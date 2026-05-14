@@ -23,7 +23,7 @@ def _claude(system: str, prompt: str) -> str:
 
 
 def _strip_json(raw: str) -> str:
-    raw = raw.strip()
+    raw = raw.strip()  
     if raw.startswith("```"):
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw.rstrip())
@@ -209,6 +209,7 @@ def start_twilio_call(phone_number: str, interview_id: str) -> dict:
         url=f"{base_url}/twilio/start/{interview_id}",
         status_callback=f"{base_url}/twilio/status/{interview_id}",
         status_callback_event=["completed", "failed", "no-answer", "busy"],
+        timeout=20,   # ring for 20 seconds, then fire no-answer callback
         record=True,
     )
     print(f"[Twilio] Call initiated — SID={call.sid}")

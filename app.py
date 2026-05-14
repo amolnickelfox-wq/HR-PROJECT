@@ -396,13 +396,13 @@ async def twilio_consent(
             f"<Say voice='Google.en-IN-Neural2-A'>"
             f"Great, let us get started. "
             f"I will ask you {total} questions. "
-            f"Speak your answer clearly. Pause for a few seconds when you are done and I will move to the next question automatically. "
+            f"Speak your answer and press hash when you are done. "
             f"If you need a question repeated, just say repeat. "
             f"Question 1 of {total}. {safe_q0}"
             f"</Say>"
             f"<Record"
             f"  action='{base_url}/twilio/answer/{interview_id}/0'"
-            f"  maxLength='120' playBeep='true' timeout='10'"
+            f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
             f"/>"
             f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/0</Redirect>"
             f"</Response>"
@@ -507,7 +507,31 @@ async def twilio_answer(
 
         print(f"[Twilio answer] interview={interview_id} q={q_idx}/{total-1} duration={duration}s")
 
-        # Repeat detection — only for short recordings
+        remind_key = f"reminded_{q_idx}"
+
+        # ── Silence reminder ──────────────────────────────────────────────────
+        # Fires once per question when the recording looks like silence:
+        #   duration < 2  → pressed # immediately without speaking
+        #   4 ≤ duration ≤ 6 → 5-second silence timeout triggered
+        if RecordingUrl and not repeat_counts.get(remind_key):
+            is_silent = duration < 2 or (4 <= duration <= 6)
+            if is_silent:
+                repeat_counts[remind_key] = True
+                print(f"[Twilio answer] silence detected (duration={duration}s) — playing reminder for q={q_idx}")
+                return _xml(
+                    f"<Response>"
+                    f"<Say voice='Google.en-IN-Neural2-A'>"
+                    f"Please press hash after completing your answer."
+                    f"</Say>"
+                    f"<Record"
+                    f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
+                    f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='10'"
+                    f"/>"
+                    f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
+                    f"</Response>"
+                )
+
+        # ── Repeat detection — only for short recordings ───────────────────────
         if RecordingUrl and duration <= 5:
             import concurrent.futures
             try:
@@ -529,7 +553,7 @@ async def twilio_answer(
                     f"<Say voice='Google.en-IN-Neural2-A'>Sure. {html.escape(questions[q_idx])}</Say>"
                     f"<Record"
                     f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
-                    f"  maxLength='120' playBeep='true' timeout='10'"
+                    f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
                     f"/>"
                     f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
                     f"</Response>"
@@ -546,7 +570,7 @@ async def twilio_answer(
                 f"<Say voice='Google.en-IN-Neural2-A'>Question {next_q+1} of {total}. {html.escape(questions[next_q])}</Say>"
                 f"<Record"
                 f"  action='{base_url}/twilio/answer/{interview_id}/{next_q}'"
-                f"  maxLength='120' playBeep='true' timeout='10'"
+                f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
                 f"/>"
                 f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{next_q}</Redirect>"
                 f"</Response>"
@@ -720,7 +744,7 @@ async def batch_status(batch_id: str):
     if not data:
         raise HTTPException(404, "Batch not found.")
     candidates_out = [
-        {k: v for k, v in c.items() if k not in ("resume_text", "analyze_result", "_batch_done")}
+        {k: v for k, v in c.items() if k not in ("resume_text", "_batch_done")}
         for c in data["candidates"]
     ]
     return {
@@ -766,17 +790,13 @@ def _process_batch(batch_id: str):
     for t in threads: t.start()
     for t in threads: t.join()
 
-    # Phase 3: start Twilio calls for qualified candidates
-    for cand in candidates:
-        if cand["filter_status"] != "qualified":
-            cand["interview_status"] = "skipped"
-            data["completed"] += 1
-            continue
-        if not cand.get("phone"):
-            cand["filter_status"]    = "no_phone"
-            cand["interview_status"] = "no_phone"
-            data["completed"] += 1
-            continue
+    # ── helper: place one call and block until terminal state ────────────────
+    terminal = {"completed", "abandoned", "failed", "callback_scheduled"}
+
+    def _call_and_wait(cand: dict, is_retry: bool = False):
+        """Place a Twilio call for cand and block until it reaches a terminal state.
+        Returns True if the interview completed/abandoned (got answers), False otherwise."""
+        label = f"[Retry] {cand.get('name')}" if is_retry else cand.get('name')
 
         interview_id = str(uuid.uuid4())
         try:
@@ -796,34 +816,28 @@ def _process_batch(batch_id: str):
             "questions":             questions,
             "jd_text":               jd_text,
             "job_title":             _extract_job_title(jd_text),
-                "recordings":            {},
+            "recordings":            {},
             "repeat_counts":         {},
             "transcript":            None,
             "score_result":          None,
         }
+
         try:
             start_twilio_call(cand["phone"], interview_id)
             cand["interview_id"]     = interview_id
             cand["interview_status"] = "calling"
+            print(f"[Batch] Calling {label} — waiting for result...")
         except Exception as e:
-            print(f"[Batch] call failed for {cand.get('name')}: {e}")
+            print(f"[Batch] Call failed for {label}: {e}")
             cand["interview_status"] = "failed"
-            data["completed"] += 1
+            return False
 
-    # Phase 4: poll until all interviews reach a terminal state (30 min max)
-    terminal = {"completed", "abandoned", "failed", "callback_scheduled"}
-    for _ in range(120):   # 120 × 15s = 30 min
-        all_done = True
-        for cand in candidates:
-            iid = cand.get("interview_id")
-            if not iid:
-                continue
-            iv        = interview_store.get(iid, {})
+        for _ in range(120):   # 120 × 15s = 30 min max
+            iv        = interview_store.get(interview_id, {})
             iv_status = iv.get("status", "unknown")
             cand["interview_status"] = iv_status
 
-            if iv_status in terminal and not cand.get("_batch_done"):
-                cand["_batch_done"] = True
+            if iv_status in terminal:
                 if iv_status == "callback_scheduled":
                     cand["callback_scheduled_at"] = iv.get("callback_scheduled_at")
                 else:
@@ -836,21 +850,58 @@ def _process_batch(batch_id: str):
                         cand["interview_score"] = iscore
                         cand["score_result"]    = sr
                         cand["combined_score"]  = round((cand["resume_score"] or 0) * 0.4 + iscore * 0.6, 1)
-                data["completed"] += 1
-            elif iv_status not in terminal:
-                all_done = False
+                # Persist interview details for the frontend detail modal
+                cand["transcript"]   = iv.get("transcript")
+                cand["questions"]    = iv.get("questions", [])
+                cand["fail_reason"]  = iv.get("fail_reason")
+                print(f"[Batch] {label} → {iv_status}")
+                return iv_status not in ("failed",)
 
-        if all_done:
-            break
-        time.sleep(15)
+            time.sleep(15)
 
-    # Phase 5: timeout any still-running interviews
+        # timeout
+        cand["interview_status"] = "timeout"
+        print(f"[Batch] {label} timed out after 30 min")
+        return False
+
+    # ── Phase 3: first pass — call every qualified candidate ─────────────────
+    no_answer_retry = []   # candidates who didn't pick up on first attempt
+
     for cand in candidates:
-        iid = cand.get("interview_id")
-        if iid and not cand.get("_batch_done") and cand["interview_status"] not in terminal:
-            cand["_batch_done"]      = True
-            cand["interview_status"] = "timeout"
+        if cand["filter_status"] != "qualified":
+            cand["interview_status"] = "skipped"
             data["completed"] += 1
+            continue
+        if not cand.get("phone"):
+            cand["filter_status"]    = "no_phone"
+            cand["interview_status"] = "no_phone"
+            data["completed"] += 1
+            continue
+
+        _call_and_wait(cand)
+
+        # Queue for retry if they didn't pick up (no-answer or busy)
+        iid = cand.get("interview_id")
+        if iid:
+            fail_reason = interview_store.get(iid, {}).get("fail_reason", "")
+            if cand["interview_status"] == "failed" and fail_reason in (
+                "Call not answered", "Candidate's line was busy"
+            ):
+                no_answer_retry.append(cand)
+                print(f"[Batch] {cand.get('name')} added to retry queue")
+            else:
+                data["completed"] += 1
+        else:
+            data["completed"] += 1
+
+    # ── Phase 4: retry no-answer candidates at the end ───────────────────────
+    if no_answer_retry:
+        print(f"[Batch] Waiting 30s before retrying {len(no_answer_retry)} candidate(s)...")
+        time.sleep(30)
+
+        for cand in no_answer_retry:
+            _call_and_wait(cand, is_retry=True)
+            data["completed"] += 1   # count retry result (pass or fail) as final
 
     data["status"] = "completed"
 

@@ -1629,3 +1629,116 @@ kbd {
   border-radius: 9px !important;
   margin-bottom: 0 !important;
 }
+
+/* ── Batch table clickable rows ───────────────────────────────────────────── */
+.batch-table-row--clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.batch-table-row--clickable:hover {
+  background: rgba(52, 211, 153, 0.06);
+}
+.batch-table-row--clickable:hover td:first-child {
+  border-left: 2px solid var(--green);
+}
+
+/* ── Batch candidate detail modal ─────────────────────────────────────────── */
+.batch-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px 48px;
+  overflow-y: auto;
+}
+
+.batch-modal-panel {
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  width: 100%;
+  max-width: 920px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.5);
+  animation: modal-in 0.2s ease;
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0)    scale(1);    }
+}
+
+.batch-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 18px 18px 0 0;
+  background: var(--surface-1);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.batch-modal-back {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+.batch-modal-back:hover {
+  color: var(--text-1);
+  border-color: var(--green);
+}
+
+.batch-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.batch-modal-body {
+  padding: 24px;
+}
+
+/* ── BatchDropZone browse buttons ─────────────────────────────────────────── */
+.batch-drop-btns {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.batch-browse-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.batch-browse-btn:hover:not(:disabled) {
+  color: var(--text-1);
+  border-color: var(--cyan);
+  background: rgba(34,211,238,0.06);
+}
+.batch-browse-btn--folder:hover:not(:disabled) {
+  border-color: var(--green);
+  background: rgba(52,211,153,0.06);
+}
+.batch-browse-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

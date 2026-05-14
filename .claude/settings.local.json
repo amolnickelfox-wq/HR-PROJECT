@@ -35,7 +35,8 @@
       "Bash(\"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install -r \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\requirements.txt\")",
       "Bash(Get-Content \"C:\\\\Users\\\\Amol\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Amol-Desktop-HR-project\\\\57cc0254-7d2b-434b-b0fd-05ca72321cad\\\\tasks\\\\bkvfjvdom.output\" -Wait -Tail 10)",
       "PowerShell(& \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install -r \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\requirements.txt\" 2>&1)",
-      "Bash(python generate_test_cvs.py)"
+      "Bash(python generate_test_cvs.py)",
+      "Bash(Test-Path \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\.env\")"
     ]
   }
 }

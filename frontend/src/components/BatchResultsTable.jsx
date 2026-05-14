@@ -1,3 +1,6 @@
+import { useState } from 'react'
+import BatchCandidateModal from './BatchCandidateModal'
+
 function scoreColor(n) {
   if (n == null) return 'batch-score-none'
   if (n >= 75)   return 'batch-score-high'
@@ -39,6 +42,8 @@ function StatusBadge({ c }) {
 }
 
 export default function BatchResultsTable({ candidates }) {
+  const [selected, setSelected] = useState(null)
+
   const sorted = [...candidates].sort((a, b) => {
     const aQ = a.filter_status === 'qualified'
     const bQ = b.filter_status === 'qualified'
@@ -74,7 +79,7 @@ export default function BatchResultsTable({ candidates }) {
           </thead>
           <tbody>
             {sorted.map((c, i) => (
-              <tr key={i}>
+              <tr key={i} className="batch-table-row--clickable" onClick={() => setSelected(c)}>
                 <td>
                   <span className="batch-rank">#{i + 1}</span>
                 </td>
@@ -129,6 +134,10 @@ export default function BatchResultsTable({ candidates }) {
           </tbody>
         </table>
       </div>
+
+      {selected && (
+        <BatchCandidateModal candidate={selected} onClose={() => setSelected(null)} />
+      )}
     </div>
   )
 }
