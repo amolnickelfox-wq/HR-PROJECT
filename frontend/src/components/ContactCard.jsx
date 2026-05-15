@@ -4,7 +4,7 @@ function ValidationBadge({ valid }) {
     : <span className="invalid-badge">✗ Invalid</span>
 }
 
-export default function ContactCard({ data, onStartInterview, callLoading, callError, onStartLocal, localLoading }) {
+export default function ContactCard({ data, onStartInterview, callLoading, callError }) {
   const canCall = data.phone && data.phone_valid
 
   return (
@@ -64,21 +64,6 @@ export default function ContactCard({ data, onStartInterview, callLoading, callE
         <div className="call-error">{callError}</div>
       )}
 
-      {/* Local interview button */}
-      <button
-        className="call-btn local-iv-btn"
-        onClick={onStartLocal}
-        disabled={localLoading}
-        title="Conduct a live interview locally without any phone call"
-      >
-        {localLoading
-          ? <><span className="call-btn__spinner" /> Generating Questions…</>
-          : <>🖥️ Start Local Interview</>
-        }
-      </button>
-
-      {/* Simulate button is commented out — replaced by Local Interview above */}
-      {/* <button className="call-btn" onClick={onOpenSimulate} ...>🧪 Simulate Interview</button> */}
     </div>
   )
 }

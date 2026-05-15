@@ -4,9 +4,9 @@ const R    = 68
 const CIRC = 2 * Math.PI * R
 
 function getColors(n) {
-  if (n >= 80) return ['#34d399', '#22d3ee']
-  if (n >= 60) return ['#fbbf24', '#fb923c']
-  return ['#fb7185', '#f43f5e']
+  if (n >= 80) return ['#059669', '#4F46E5']
+  if (n >= 60) return ['#D97706', '#F59E0B']
+  return ['#DC2626', '#EF4444']
 }
 
 function getVerdict(n) {

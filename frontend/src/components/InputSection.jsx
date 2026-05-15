@@ -1,111 +1,139 @@
 import { useState, useCallback, useRef } from 'react'
 
-function PipelineIllustration() {
+// ── batch file helpers ──
+const ACCEPTED_EXT = ['.pdf', '.docx', '.doc']
+function isAccepted(name) {
+  return ACCEPTED_EXT.some(ext => name.toLowerCase().endsWith(ext))
+}
+async function readEntry(entry) {
+  if (entry.isFile) return new Promise((res, rej) => entry.file(res, rej))
+  if (entry.isDirectory) {
+    const reader = entry.createReader()
+    const all = []
+    await new Promise(resolve => {
+      const read = () => reader.readEntries(batch => {
+        if (!batch.length) { resolve(); return }
+        all.push(...batch); read()
+      })
+      read()
+    })
+    return (await Promise.all(all.map(readEntry))).flat()
+  }
+  return []
+}
+
+const RESUME_PLACEHOLDER = `Paste the candidate's full resume here…
+
+John Doe · john@email.com · +91-9876543210
+
+Skills: Python, Machine Learning, NLP, Docker
+Experience: 3 years at ABC Corp as ML Engineer`
+
+const JD_PLACEHOLDER = `Paste the job description here…
+
+Job Title: Machine Learning Engineer
+Required Skills: Python, TensorFlow, NLP
+Experience: 2–4 years`
+
+// ─────────────────────────────────────────────
+// Page intros (replaces the old hero section)
+// ─────────────────────────────────────────────
+function PageIntro({ mode }) {
+  if (mode === 'batch') {
+    return (
+      <div className="page-intro">
+        <div className="page-intro-steps">
+          <span className="page-intro-step"><span className="step-num">1</span> Upload resumes</span>
+          <span className="step-arrow">→</span>
+          <span className="page-intro-step"><span className="step-num">2</span> AI scores all</span>
+          <span className="step-arrow">→</span>
+          <span className="page-intro-step"><span className="step-num">3</span> Filter ≥ 75</span>
+          <span className="step-arrow">→</span>
+          <span className="page-intro-step"><span className="step-num">4</span> Auto-interview</span>
+          <span className="step-arrow">→</span>
+          <span className="page-intro-step"><span className="step-num">5</span> Ranked report</span>
+        </div>
+      </div>
+    )
+  }
   return (
-    <div className="pipeline-wrap">
-      <svg viewBox="0 0 580 130" fill="none" xmlns="http://www.w3.org/2000/svg" className="pipeline-svg">
-        {/* ── Node 1: Resume ── */}
-        <circle cx="65" cy="65" r="48" fill="rgba(52,211,153,0.06)" stroke="rgba(52,211,153,0.18)" strokeWidth="1"/>
-        <circle className="pipe-node-ring" cx="65" cy="65" r="48" fill="none" stroke="rgba(52,211,153,0.4)" strokeWidth="1"/>
-        <text x="65" y="57" textAnchor="middle" fontSize="24" dominantBaseline="middle">📄</text>
-        <text x="65" y="83" textAnchor="middle" fontSize="9" fill="#34d399" fontWeight="700" letterSpacing="1.5">RESUME</text>
-
-        {/* ── Arrow 1→2 ── */}
-        <line x1="116" y1="65" x2="164" y2="65" stroke="rgba(34,211,238,0.35)" strokeWidth="1.5" strokeDasharray="5 3" className="flow-line-1"/>
-        <polygon points="161,60 170,65 161,70" fill="rgba(34,211,238,0.5)"/>
-
-        {/* ── Node 2: AI Parse ── */}
-        <circle cx="215" cy="65" r="48" fill="rgba(34,211,238,0.06)" stroke="rgba(34,211,238,0.18)" strokeWidth="1"/>
-        <circle className="pipe-node-ring pipe-node-ring-2" cx="215" cy="65" r="48" fill="none" stroke="rgba(34,211,238,0.4)" strokeWidth="1"/>
-        <text x="215" y="57" textAnchor="middle" fontSize="24" dominantBaseline="middle">🤖</text>
-        <text x="215" y="83" textAnchor="middle" fontSize="9" fill="#22d3ee" fontWeight="700" letterSpacing="1.5">AI PARSE</text>
-
-        {/* ── Arrow 2→3 ── */}
-        <line x1="266" y1="65" x2="314" y2="65" stroke="rgba(167,139,250,0.35)" strokeWidth="1.5" strokeDasharray="5 3" className="flow-line-2"/>
-        <polygon points="311,60 320,65 311,70" fill="rgba(167,139,250,0.5)"/>
-
-        {/* ── Node 3: Scoring ── */}
-        <circle cx="365" cy="65" r="48" fill="rgba(167,139,250,0.06)" stroke="rgba(167,139,250,0.18)" strokeWidth="1"/>
-        <circle className="pipe-node-ring pipe-node-ring-3" cx="365" cy="65" r="48" fill="none" stroke="rgba(167,139,250,0.4)" strokeWidth="1"/>
-        <text x="365" y="57" textAnchor="middle" fontSize="24" dominantBaseline="middle">🎯</text>
-        <text x="365" y="83" textAnchor="middle" fontSize="9" fill="#a78bfa" fontWeight="700" letterSpacing="1.5">SCORING</text>
-
-        {/* ── Arrow 3→4 ── */}
-        <line x1="416" y1="65" x2="464" y2="65" stroke="rgba(251,191,36,0.35)" strokeWidth="1.5" strokeDasharray="5 3" className="flow-line-3"/>
-        <polygon points="461,60 470,65 461,70" fill="rgba(251,191,36,0.5)"/>
-
-        {/* ── Node 4: Interview ── */}
-        <circle cx="515" cy="65" r="48" fill="rgba(251,191,36,0.06)" stroke="rgba(251,191,36,0.18)" strokeWidth="1"/>
-        <circle className="pipe-node-ring pipe-node-ring-4" cx="515" cy="65" r="48" fill="none" stroke="rgba(251,191,36,0.4)" strokeWidth="1"/>
-        <text x="515" y="57" textAnchor="middle" fontSize="24" dominantBaseline="middle">📞</text>
-        <text x="515" y="83" textAnchor="middle" fontSize="9" fill="#fbbf24" fontWeight="700" letterSpacing="1.5">INTERVIEW</text>
-      </svg>
+    <div className="page-intro">
+      <div className="page-intro-steps">
+        <span className="page-intro-step"><span className="step-num">1</span> Paste resume</span>
+        <span className="step-arrow">→</span>
+        <span className="page-intro-step"><span className="step-num">2</span> Add job description</span>
+        <span className="step-arrow">→</span>
+        <span className="page-intro-step"><span className="step-num">3</span> AI match score</span>
+        <span className="step-arrow">→</span>
+        <span className="page-intro-step"><span className="step-num">4</span> Phone interview</span>
+      </div>
     </div>
   )
 }
 
-const PILLS = [
-  { icon: '⚡', label: 'Instant Analysis' },
-  { icon: '🧠', label: 'Claude AI Powered' },
-  { icon: '🎯', label: 'Smart JD Matching' },
-  { icon: '📞', label: 'Twilio Phone Interviews' },
-  { icon: '🔊', label: 'Groq Whisper STT' },
-]
+// ─────────────────────────────────────────────
+// Main component
+// ─────────────────────────────────────────────
+export default function InputSection({
+  onAnalyze, loading, error,
+  batchFiles, onBatchFilesChange, onBatchStart, batchLoading, batchError,
+  mode = 'single', // 'single' | 'batch'
+  defaultJd = '',
+}) {
+  const [resume,     setResume]     = useState('')
+  const [jd,         setJd]         = useState(defaultJd)
+  const [uploading,  setUploading]  = useState(false)
+  const [fileName,   setFileName]   = useState('')
+  const [uploadErr,  setUploadErr]  = useState('')
+  const [resumeDrag, setResumeDrag] = useState(false)
+  const [jdDrag,     setJdDrag]     = useState(false)
 
-const RESUME_PLACEHOLDER = `Paste the candidate's full resume here...
-
-Example:
-John Doe
-john@email.com | +91-9876543210
-
-Skills: Python, Machine Learning, NLP, Docker...
-Experience: 3 years at ABC Corp as ML Engineer...`
-
-const JD_PLACEHOLDER = `Paste the job description here...
-
-Example:
-Job Title: Machine Learning Engineer
-Required Skills: Python, TensorFlow, NLP...
-Experience: 2-4 years...`
-
-export default function InputSection({ onAnalyze, loading, error }) {
-  const [resume,      setResume]      = useState('')
-  const [jd,          setJd]          = useState('')
-  const [uploading,   setUploading]   = useState(false)
-  const [fileName,    setFileName]    = useState('')
-  const [uploadErr,   setUploadErr]   = useState('')
-  const [resumeDrag,  setResumeDrag]  = useState(false)
-  const [jdDrag,      setJdDrag]      = useState(false)
   const fileInputRef = useRef(null)
+  const batchFileRef = useRef(null)
+  const folderRef    = useRef(null)
 
+  const isBatch = mode === 'batch'
+
+  // ── batch file helpers ──
+  const addBatchFiles = (newFiles) => {
+    const accepted = Array.from(newFiles).filter(f => isAccepted(f.name))
+    const existing = new Set(batchFiles.map(f => f.name))
+    onBatchFilesChange([...batchFiles, ...accepted.filter(f => !existing.has(f.name))])
+  }
+  const removeBatchFile = (name) => onBatchFilesChange(batchFiles.filter(f => f.name !== name))
+
+  // ── submit ──
   const handleSubmit = useCallback(() => {
-    if (!resume.trim() || !jd.trim()) return
-    onAnalyze(resume, jd)
-  }, [resume, jd, onAnalyze])
+    if (isBatch) {
+      if (!jd.trim() || !batchFiles.length) return
+      onBatchStart(batchFiles, jd)
+    } else {
+      if (!resume.trim() || !jd.trim()) return
+      onAnalyze(resume, jd)
+    }
+  }, [isBatch, batchFiles, jd, resume, onBatchStart, onAnalyze])
 
   const handleKeyDown = useCallback((e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleSubmit()
   }, [handleSubmit])
 
-  const handleClear = () => { setResume(''); setJd(''); setFileName(''); setUploadErr('') }
+  const handleClear = () => {
+    setResume(''); setJd(''); setFileName(''); setUploadErr('')
+    if (isBatch) onBatchFilesChange([])
+  }
 
+  // ── single-file upload ──
   const uploadFile = async (file) => {
-    setUploading(true)
-    setUploadErr('')
-    setFileName(file.name)
+    setUploading(true); setUploadErr(''); setFileName(file.name)
     const form = new FormData()
     form.append('file', file)
     try {
       const res = await fetch('/upload-resume', { method: 'POST', body: form })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Upload failed')
-      }
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Upload failed') }
       const data = await res.json()
       setResume(data.resume_text)
     } catch (e) {
-      setUploadErr(e.message || 'Failed to parse file.')
-      setFileName('')
+      setUploadErr(e.message || 'Failed to parse file.'); setFileName('')
     } finally {
       setUploading(false)
     }
@@ -118,16 +146,36 @@ export default function InputSection({ onAnalyze, loading, error }) {
     e.target.value = ''
   }
 
+  // ── drag-and-drop ──
   const handleResumeDrop = async (e) => {
-    e.preventDefault()
-    setResumeDrag(false)
-    const file = e.dataTransfer.files?.[0]
-    if (file) await uploadFile(file)
+    e.preventDefault(); setResumeDrag(false)
+    if (isBatch) {
+      const items = Array.from(e.dataTransfer.items || [])
+      if (items.length > 0 && items[0].webkitGetAsEntry) {
+        const entries = items.map(i => i.webkitGetAsEntry()).filter(Boolean)
+        const allFiles = (await Promise.all(entries.map(readEntry))).flat()
+        addBatchFiles(allFiles)
+      } else {
+        addBatchFiles(e.dataTransfer.files)
+      }
+    } else {
+      const items = Array.from(e.dataTransfer.items || [])
+      if (items.length > 0 && items[0].webkitGetAsEntry) {
+        const entries = items.map(i => i.webkitGetAsEntry()).filter(Boolean)
+        const file = await (async () => {
+          if (entries[0]?.isFile) return new Promise((res, rej) => entries[0].file(res, rej))
+          return e.dataTransfer.files?.[0]
+        })()
+        if (file) await uploadFile(file)
+      } else {
+        const file = e.dataTransfer.files?.[0]
+        if (file) await uploadFile(file)
+      }
+    }
   }
 
   const handleJdDrop = (e) => {
-    e.preventDefault()
-    setJdDrag(false)
+    e.preventDefault(); setJdDrag(false)
     const file = e.dataTransfer.files?.[0]
     if (!file) return
     const reader = new FileReader()
@@ -138,31 +186,11 @@ export default function InputSection({ onAnalyze, loading, error }) {
   return (
     <section className="input-section" onKeyDown={handleKeyDown}>
 
-      {/* Hero */}
-      <div className="hero">
-        <div className="hero-eyebrow">
-          <span className="hero-dot" />
-          Powered by Claude AI · Groq Whisper · Twilio
-        </div>
-        <h2 className="hero-title">
-          AI Recruitment <span className="hero-gradient">Intelligence</span>
-        </h2>
-        <p className="hero-sub">
-          Parse resumes, score candidates against job requirements, and run fully automated AI-powered phone interviews — all in one seamless flow.
-        </p>
-        <PipelineIllustration />
-        <div className="feature-pills">
-          {PILLS.map(p => (
-            <div key={p.label} className="feature-pill">
-              <span className="feature-pill-icon">{p.icon}</span>
-              {p.label}
-            </div>
-          ))}
-        </div>
-      </div>
+      <PageIntro mode={mode} />
 
       <div className="input-grid">
-        {/* Resume */}
+
+        {/* ── LEFT CARD ── */}
         <div
           className={`input-card${resumeDrag ? ' drag-over' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setResumeDrag(true) }}
@@ -171,42 +199,90 @@ export default function InputSection({ onAnalyze, loading, error }) {
         >
           <div className="input-card-header">
             <div className="input-card-title">
-              <span className="icon">📄</span>
-              Resume Text
+              <span className="input-card-icon">{isBatch ? '📂' : '📄'}</span>
+              {isBatch ? `Resume Files${batchFiles.length > 0 ? ` (${batchFiles.length})` : ''}` : 'Resume'}
             </div>
-            <div className="resume-header-right">
-              {fileName && !uploadErr && (
-                <span className="upload-filename">{fileName}</span>
-              )}
-              <button
-                className="btn-upload-pdf"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading || loading}
-                title="Upload PDF or DOCX resume"
-              >
-                {uploading ? <><div className="spinner-sm" /> Parsing...</> : <>Upload PDF</>}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.docx,.doc"
-                style={{ display: 'none' }}
-                onChange={handleFileChange}
-              />
-              <span className="char-count">{resume.length} chars</span>
-            </div>
+            {!isBatch && (
+              <div className="resume-header-right">
+                {fileName && !uploadErr && (
+                  <span className="upload-filename">{fileName}</span>
+                )}
+                <button
+                  className="btn-upload-pdf"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading || loading}
+                >
+                  {uploading
+                    ? <><div className="spinner-sm" /> Parsing…</>
+                    : <>↑ Upload PDF</>
+                  }
+                </button>
+                {resume.length > 0 && (
+                  <span className="char-count">{resume.length} chars</span>
+                )}
+              </div>
+            )}
           </div>
+
           {uploadErr && <div className="upload-error">{uploadErr}</div>}
-          <textarea
-            className="input-area"
-            placeholder={RESUME_PLACEHOLDER}
-            value={resume}
-            onChange={e => setResume(e.target.value)}
-            spellCheck={false}
-          />
+
+          {/* BATCH: empty drop zone */}
+          {isBatch && batchFiles.length === 0 && (
+            <div className="batch-dropzone-empty">
+              <div className="batch-dz-icon">📂</div>
+              <div className="batch-dz-title">Drop resume files here</div>
+              <div className="batch-dz-sub">PDF, DOCX or DOC · supports folders and multiple files</div>
+              <div className="batch-dz-btns">
+                <button className="batch-browse-btn" type="button"
+                  onClick={() => batchFileRef.current?.click()} disabled={batchLoading}>
+                  📄 Browse Files
+                </button>
+                <button className="batch-browse-btn batch-browse-btn--folder" type="button"
+                  onClick={() => folderRef.current?.click()} disabled={batchLoading}>
+                  📁 Select Folder
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* BATCH: files loaded */}
+          {isBatch && batchFiles.length > 0 && (
+            <div className="batch-files-loaded">
+              <div className="batch-file-chips">
+                {batchFiles.map(f => (
+                  <span key={f.name} className="batch-file-chip">
+                    <span className="batch-file-chip-name">📄 {f.name}</span>
+                    <button className="batch-file-chip-remove"
+                      onClick={() => removeBatchFile(f.name)} title="Remove">×</button>
+                  </span>
+                ))}
+              </div>
+              <div className="batch-drop-btns" style={{ marginTop: 10 }}>
+                <button className="batch-browse-btn" type="button"
+                  onClick={() => batchFileRef.current?.click()} disabled={batchLoading}>
+                  📄 Add More
+                </button>
+                <button className="batch-browse-btn batch-browse-btn--folder" type="button"
+                  onClick={() => folderRef.current?.click()} disabled={batchLoading}>
+                  📁 Add Folder
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* SINGLE: resume textarea */}
+          {!isBatch && (
+            <textarea
+              className="input-area"
+              placeholder={RESUME_PLACEHOLDER}
+              value={resume}
+              onChange={e => setResume(e.target.value)}
+              spellCheck={false}
+            />
+          )}
         </div>
 
-        {/* JD */}
+        {/* ── RIGHT CARD: Job Description ── */}
         <div
           className={`input-card${jdDrag ? ' drag-over' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setJdDrag(true) }}
@@ -215,10 +291,10 @@ export default function InputSection({ onAnalyze, loading, error }) {
         >
           <div className="input-card-header">
             <div className="input-card-title">
-              <span className="icon">📋</span>
+              <span className="input-card-icon">📋</span>
               Job Description
             </div>
-            <span className="char-count">{jd.length} chars</span>
+            {jd.length > 0 && <span className="char-count">{jd.length} chars</span>}
           </div>
           <textarea
             className="input-area"
@@ -230,31 +306,52 @@ export default function InputSection({ onAnalyze, loading, error }) {
         </div>
       </div>
 
-      {/* Actions */}
+      {/* ── Actions ── */}
       <div className="btn-row">
         <button
           className="btn-analyze"
           onClick={handleSubmit}
-          disabled={loading || !resume.trim() || !jd.trim()}
+          disabled={
+            isBatch
+              ? (batchLoading || !jd.trim() || batchFiles.length === 0)
+              : (loading || !resume.trim() || !jd.trim())
+          }
         >
-          {loading
-            ? <><div className="spinner" /> Analyzing...</>
-            : <>⚡ Analyze Resume</>
+          {isBatch
+            ? batchLoading
+              ? <><div className="spinner" /> Starting pipeline…</>
+              : <>⚡ Run Batch Pipeline</>
+            : loading
+              ? <><div className="spinner" /> Analyzing…</>
+              : <>⚡ Analyze Candidate</>
           }
         </button>
-        <button className="btn-clear" onClick={handleClear} disabled={loading}>
+        <button className="btn-clear" onClick={handleClear} disabled={loading || batchLoading}>
           Clear
         </button>
       </div>
+
       <p className="hint">
-        Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to analyze
+        {isBatch
+          ? batchFiles.length > 0
+            ? `${batchFiles.length} resume${batchFiles.length !== 1 ? 's' : ''} queued · candidates scoring ≥ 75 will be auto-interviewed`
+            : 'Drop files above or use the browser to add resumes'
+          : <><kbd>Ctrl</kbd>+<kbd>Enter</kbd> to analyze · or drag a PDF onto the resume card</>
+        }
       </p>
 
-      {error && (
-        <div className="error-banner">
-          ⚠️ {error}
-        </div>
-      )}
+      {!isBatch && error     && <div className="error-banner">⚠️ {error}</div>}
+      {isBatch  && batchError && <div className="error-banner">⚠️ {batchError}</div>}
+
+      {/* Hidden file inputs */}
+      <input ref={fileInputRef} type="file" accept=".pdf,.docx,.doc"
+        style={{ display: 'none' }} onChange={handleFileChange} />
+      <input ref={batchFileRef} type="file" multiple accept=".pdf,.docx,.doc"
+        style={{ display: 'none' }}
+        onChange={e => { addBatchFiles(e.target.files); e.target.value = '' }} />
+      <input ref={folderRef} type="file" webkitdirectory="true" mozdirectory="true" multiple
+        style={{ display: 'none' }}
+        onChange={e => { addBatchFiles(e.target.files); e.target.value = '' }} />
     </section>
   )
 }

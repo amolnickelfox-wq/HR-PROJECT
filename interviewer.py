@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 import anthropic as _anthropic
 
 load_dotenv()
-
 _claude_key   = os.getenv("CLAUDE_API_KEY")
 claude_client = _anthropic.Anthropic(api_key=_claude_key) if _claude_key else None
 CLAUDE_MODEL  = "claude-sonnet-4-6"

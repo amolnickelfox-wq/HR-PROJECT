@@ -22,6 +22,8 @@ function StatusBadge({ c }) {
         const d = new Date(c.callback_scheduled_at)
         label = `📅 ${d.toLocaleDateString('en-IN', { weekday: 'short' })} ${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
       } catch (_) {}
+    } else if (c.callback_time_raw) {
+      label = `📅 "${c.callback_time_raw}"`
     }
     return <span className="score-verdict verdict-medium" style={{ fontSize: '0.7rem' }}>{label}</span>
   }
@@ -41,7 +43,7 @@ function StatusBadge({ c }) {
   return <span className="score-verdict" style={{ fontSize: '0.7rem', color: 'var(--text-3)' }}>—</span>
 }
 
-export default function BatchResultsTable({ candidates }) {
+export default function BatchResultsTable({ candidates, isComplete = true }) {
   const [selected, setSelected] = useState(null)
 
   const sorted = [...candidates].sort((a, b) => {
@@ -53,15 +55,23 @@ export default function BatchResultsTable({ candidates }) {
     return (b.resume_score ?? 0) - (a.resume_score ?? 0)
   })
 
-  const qualified = candidates.filter(c => c.filter_status === 'qualified').length
-  const filtered  = candidates.filter(c => c.filter_status === 'filtered_out' || c.filter_status === 'no_phone').length
+  const qualified  = candidates.filter(c => c.filter_status === 'qualified').length
+  const filtered   = candidates.filter(c => c.filter_status === 'filtered_out' || c.filter_status === 'no_phone').length
+  const doneCount  = candidates.filter(c =>
+    ['completed', 'abandoned', 'failed', 'callback_scheduled', 'skipped', 'no_phone'].includes(c.interview_status)
+  ).length
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <span className="section-label">Final Rankings</span>
+        <span className="section-label">
+          {isComplete ? 'Final Rankings' : 'Live Rankings'}
+        </span>
         <span className="char-count">
-          {qualified} interviewed · {filtered} filtered out
+          {isComplete
+            ? `${qualified} interviewed · ${filtered} filtered out`
+            : `${doneCount} of ${candidates.length} done · click any row for details`
+          }
         </span>
       </div>
 

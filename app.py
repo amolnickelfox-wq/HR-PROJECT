@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 import fitz
 import httpx as _httpx
 from fastapi import FastAPI, HTTPException, Request, Form, BackgroundTasks, UploadFile, File
-from fastapi.responses import HTMLResponse, Response, JSONResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -97,13 +97,51 @@ def _extract_text(content: bytes, filename: str) -> str:
 
 
 def _detect_consent(text: str) -> bool:
-    """Return True if the candidate agreed to proceed with the interview."""
-    t = text.lower()
-    no_words  = {"no", "not", "busy", "later", "bad time", "can't", "cannot", "different", "nope", "nah"}
-    yes_words = {"yes", "sure", "okay", "ok", "now", "good", "fine", "ready", "go ahead", "of course", "yeah", "yep", "absolutely"}
-    if any(w in t for w in no_words):  return False
-    if any(w in t for w in yes_words): return True
-    return True  # default: proceed if unclear
+    """Return True if the candidate agreed to proceed.
+    Uses keyword matching for clear cases; falls back to Claude sentiment for ambiguous ones."""
+    t = text.lower().strip()
+    if not t:
+        return False  # no speech captured → not ready
+
+    no_words  = ["no", "nope", "nah", "not", "busy", "later", "bad time", "can't", "cannot", "different"]
+    yes_words = ["yes", "yeah", "yep", "sure", "okay", "ok", "good", "fine", "ready",
+                 "go ahead", "of course", "absolutely", "now", "perfect", "great"]
+
+    has_no  = any(re.search(r'\b' + re.escape(w) + r'\b', t) for w in no_words)
+    has_yes = any(re.search(r'\b' + re.escape(w) + r'\b', t) for w in yes_words)
+
+    # Clear unambiguous keyword match → use it immediately
+    if has_no and not has_yes:
+        print(f"[Consent] keyword=NO  text='{text}'")
+        return False
+    if has_yes and not has_no:
+        print(f"[Consent] keyword=YES text='{text}'")
+        return True
+
+    # Ambiguous or no keyword match → ask Claude for sentiment
+    claude_key = os.getenv("CLAUDE_API_KEY")
+    if claude_key:
+        try:
+            client = _anthropic.Anthropic(api_key=claude_key)
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=5,
+                system="You classify spoken responses. Reply with only the word YES or NO.",
+                messages=[{"role": "user", "content":
+                    f"A candidate was asked: \"Is this a good time for a job interview?\"\n"
+                    f"They responded: \"{text}\"\n"
+                    f"Are they agreeing to proceed with the interview right now? Reply YES or NO only."
+                }],
+            )
+            result = resp.content[0].text.strip().upper()
+            print(f"[Consent] Claude sentiment='{result}' text='{text}'")
+            return result.startswith("Y")
+        except Exception as e:
+            print(f"[Consent] Claude sentiment failed: {e}")
+
+    # Claude unavailable: if any no-keyword present, decline; else give benefit of doubt
+    print(f"[Consent] fallback has_no={has_no} text='{text}'")
+    return not has_no
 
 
 def _parse_callback_time(raw: str) -> str | None:
@@ -341,7 +379,7 @@ async def twilio_start(interview_id: str):
 
     return _xml(
         f"<Response>"
-        f"<Gather input='speech' speechTimeout='auto' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
+        f"<Gather input='speech' speechTimeout='1' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
         f"<Say voice='Google.en-IN-Neural2-A'>"
         f"Hello {safe_name}. I am calling from the HR team at Nickelfox Technologies "
         f"regarding your application for the {safe_title} role. "
@@ -364,7 +402,6 @@ REPEAT_KEYWORDS = [
 @app.api_route("/twilio/consent/{interview_id}", methods=["GET", "POST"])
 async def twilio_consent(
     interview_id: str,
-    request:      Request,
     SpeechResult: str = Form(default=None),
     RecordingUrl: str = Form(default=None),
 ):
@@ -389,17 +426,30 @@ async def twilio_consent(
     print(f"[Consent] interview={interview_id} transcript='{transcript}'")
     data["consent_raw"] = transcript
 
+    # If nothing was captured, re-ask once before giving up
+    if not transcript.strip():
+        if not data.get("consent_re_asked"):
+            data["consent_re_asked"] = True
+            return _xml(
+                f"<Response>"
+                f"<Gather input='speech' speechTimeout='1' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
+                f"<Say voice='Google.en-IN-Neural2-A'>Sorry, I didn't catch that. Is this a good time for the interview? Please say yes or no.</Say>"
+                f"</Gather>"
+                f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
+                f"</Response>"
+            )
+        else:
+            # Still no speech on second try — hang up gracefully
+            data["status"]         = "failed"
+            data["fail_reason"]    = "No response during consent check"
+            data["consent_status"] = "declined"
+            return _hangup_xml()
+
     if _detect_consent(transcript):
         data["consent_status"] = "accepted"
         return _xml(
             f"<Response>"
-            f"<Say voice='Google.en-IN-Neural2-A'>"
-            f"Great, let us get started. "
-            f"I will ask you {total} questions. "
-            f"Speak your answer and press hash when you are done. "
-            f"If you need a question repeated, just say repeat. "
-            f"Question 1 of {total}. {safe_q0}"
-            f"</Say>"
+            f"<Say voice='Google.en-IN-Neural2-A'>Great! Question 1. {safe_q0}</Say>"
             f"<Record"
             f"  action='{base_url}/twilio/answer/{interview_id}/0'"
             f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
@@ -840,6 +890,7 @@ def _process_batch(batch_id: str):
             if iv_status in terminal:
                 if iv_status == "callback_scheduled":
                     cand["callback_scheduled_at"] = iv.get("callback_scheduled_at")
+                    cand["callback_time_raw"]     = iv.get("callback_time_raw")
                 else:
                     sr = iv.get("score_result")
                     if sr:
@@ -866,6 +917,7 @@ def _process_batch(batch_id: str):
 
     # ── Phase 3: first pass — call every qualified candidate ─────────────────
     no_answer_retry = []   # candidates who didn't pick up on first attempt
+
 
     for cand in candidates:
         if cand["filter_status"] != "qualified":

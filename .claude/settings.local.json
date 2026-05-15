@@ -36,7 +36,15 @@
       "Bash(Get-Content \"C:\\\\Users\\\\Amol\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Amol-Desktop-HR-project\\\\57cc0254-7d2b-434b-b0fd-05ca72321cad\\\\tasks\\\\bkvfjvdom.output\" -Wait -Tail 10)",
       "PowerShell(& \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install -r \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\requirements.txt\" 2>&1)",
       "Bash(python generate_test_cvs.py)",
-      "Bash(Test-Path \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\.env\")"
+      "Bash(Test-Path \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\\\\.env\")",
+      "Bash(npx vite *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('status:', d['status']\\); [print\\(f\\\\\"  {c['file_name']}: resume_score={c.get\\('resume_score'\\)}, filter={c.get\\('filter_status'\\)}, interview={c.get\\('interview_status'\\)}\\\\\"\\) for c in d['candidates']]\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\Amol\\\\Desktop\\\\HR project\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(python -m py_compile app.py)",
+      "Bash(xargs grep -l \"BatchSection\\\\|from.*BatchSection\")"
     ]
   }
 }

@@ -6,12 +6,9 @@ import ContactCard    from './ContactCard'
 import ReasonBox      from './ReasonBox'
 import JsonViewer     from './JsonViewer'
 import InterviewPanel from './InterviewPanel'
-import LocalInterview from './LocalInterview'
 
 export default function ResultsDashboard({
   data, interview, callLoading, callError, onStartInterview,
-  resumeText, jdText, candidateName,
-  localStep, localError, onStartLocal, onLocalComplete, onLocalCancel,
 }) {
   return (
     <section className="results-section">
@@ -26,8 +23,6 @@ export default function ResultsDashboard({
           onStartInterview={onStartInterview}
           callLoading={callLoading}
           callError={callError}
-          onStartLocal={onStartLocal}
-          localLoading={localStep === 'loading'}
         />
       </div>
 
@@ -53,32 +48,6 @@ export default function ResultsDashboard({
                 <div className="project-dot" />{p}
               </div>
             ))}
-          </div>
-        </div>
-      )}
-
-      {localError && (
-        <div className="call-error" style={{ marginBottom: 12 }}>{localError}</div>
-      )}
-
-      {/* Live voice interview */}
-      {localStep === 'in-progress' && (
-        <LocalInterview
-          resumeText={resumeText}
-          jdText={jdText}
-          candidateName={candidateName}
-          onComplete={onLocalComplete}
-          onCancel={onLocalCancel}
-        />
-      )}
-
-      {/* Scoring spinner */}
-      {localStep === 'scoring' && (
-        <div className="local-iv-card">
-          <div className="local-iv-scoring">
-            <div className="local-iv-scoring-ring" />
-            <div className="local-iv-scoring-label">Scoring your interview…</div>
-            <div className="local-iv-scoring-sub">Claude is reviewing the full conversation</div>
           </div>
         </div>
       )}
