@@ -80,12 +80,58 @@ function MetricCard({ metric, score }) {
   )
 }
 
+function fmt(iso) {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+      + ' · '
+      + d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+  } catch { return iso }
+}
+
+function callDuration(start, end) {
+  if (!start || !end) return null
+  const secs = Math.round((new Date(end) - new Date(start)) / 1000)
+  if (secs < 60) return `${secs}s`
+  return `${Math.floor(secs / 60)}m ${secs % 60}s`
+}
+
+function CallLogBadge({ status, failReason, callbackScheduledAt, isCallback }) {
+  let label, cls
+  if (status === 'completed')  { label = '✓ Completed';     cls = 'verdict-high'   }
+  else if (status === 'calling' || status === 'processing') {
+    label = isCallback ? '📞 Callback In Progress' : '📞 In Progress'
+    cls = 'verdict-medium'
+  }
+  else if (status === 'callback_scheduled') {
+    label = callbackScheduledAt
+      ? `📅 Callback at ${fmt(callbackScheduledAt)}`
+      : '📅 Callback Scheduled'
+    cls = 'verdict-medium'
+  }
+  else if (status === 'abandoned') { label = '📵 Call Dropped';  cls = 'verdict-low'  }
+  else if (status === 'failed') {
+    const r = (failReason || '').toLowerCase()
+    label = r.includes('not answered') ? '📵 Not Answered'
+          : r.includes('busy')         ? '📵 Line Busy'
+          : '✕ Failed'
+    cls = 'verdict-low'
+  } else { label = status; cls = '' }
+
+  return (
+    <span className={`score-verdict ${cls}`} style={{ fontSize: '0.7rem' }}>
+      {label}
+    </span>
+  )
+}
+
 export default function InterviewPanel({ interview }) {
   const [showTranscript, setShowTranscript] = useState(false)
 
   if (!interview) return null
 
-  const { status, questions, score_result, transcript } = interview
+  const { status, questions, score_result, transcript, call_log } = interview
 
   const totalScore = score_result
     ? (score_result.communication?.score      || 0) +
@@ -100,6 +146,36 @@ export default function InterviewPanel({ interview }) {
         HR Phone Screening
       </div>
 
+      {call_log?.length > 0 && (
+        <div className="card iv-call-history">
+          <div className="section-label" style={{ marginBottom: 10 }}>Call History</div>
+          {call_log.map((entry, i) => (
+            <div key={i} className="iv-call-entry">
+              <div className="iv-call-attempt">
+                #{entry.attempt}
+                {entry.is_callback && (
+                  <div style={{ fontSize: '0.6rem', color: 'var(--text-3)', fontWeight: 400 }}>callback</div>
+                )}
+              </div>
+              <div className="iv-call-meta">
+                <div className="iv-call-time">{fmt(entry.started_at)}</div>
+                {entry.ended_at && callDuration(entry.started_at, entry.ended_at) && (
+                  <div className="iv-call-duration">
+                    Duration: {callDuration(entry.started_at, entry.ended_at)}
+                  </div>
+                )}
+              </div>
+              <CallLogBadge
+                status={entry.status}
+                failReason={entry.fail_reason}
+                callbackScheduledAt={entry.callback_scheduled_at}
+                isCallback={entry.is_callback}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
       {status === 'calling' && (
         <div className="iv-status iv-status--calling">
           <span className="iv-pulse" />
@@ -110,21 +186,31 @@ export default function InterviewPanel({ interview }) {
       {status === 'processing' && (
         <div className="iv-status iv-status--calling">
           <span className="iv-pulse" />
-          Processing interview — transcribing and scoring…
+          {interview.processing_step
+            ? `${interview.processing_step}…`
+            : 'Processing interview — transcribing and scoring…'}
         </div>
       )}
 
       {status === 'abandoned' && (
         <div className="iv-status iv-status--failed">
-          ⚠️ {interview.fail_reason || 'Candidate disconnected before completing the interview.'}
+          📵 Candidate ended the call before completing the interview.
         </div>
       )}
 
-      {status === 'failed' && (
-        <div className="iv-status iv-status--failed">
-          ✕ {interview.fail_reason || 'Call could not be connected.'}
-        </div>
-      )}
+      {status === 'failed' && (() => {
+        const r = (interview.fail_reason || '').toLowerCase()
+        const msg = r.includes('not answered')
+          ? 'Candidate did not answer the call.'
+          : r.includes('busy')
+          ? 'Candidate\'s line was busy.'
+          : interview.fail_reason || 'Call could not be connected.'
+        return (
+          <div className="iv-status iv-status--failed">
+            📵 {msg}
+          </div>
+        )
+      })()}
 
       {questions && questions.length > 0 && (
         <div className="card" style={{ marginBottom: 16 }}>

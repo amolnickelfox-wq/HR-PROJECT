@@ -1517,6 +1517,68 @@ kbd {
   color: var(--primary);
 }
 
+.batch-call-btn {
+  background: none;
+  border: 1px solid var(--primary);
+  color: var(--primary);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.batch-call-btn:hover {
+  background: var(--primary);
+  color: #fff;
+}
+.batch-call-btn--filtered {
+  border-color: var(--text-3);
+  color: var(--text-3);
+  opacity: 0.7;
+}
+.batch-call-btn--filtered:hover {
+  background: var(--text-3);
+  color: #fff;
+  opacity: 1;
+}
+
+/* Call history in InterviewPanel */
+.iv-call-history {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+}
+.iv-call-entry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.iv-call-entry:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.iv-call-attempt {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-3);
+  min-width: 24px;
+}
+.iv-call-meta {
+  flex: 1;
+}
+.iv-call-time {
+  font-size: 0.8rem;
+  color: var(--text-1);
+  font-weight: 500;
+}
+.iv-call-duration {
+  font-size: 0.7rem;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
 /* Small avatar variant (32 px) */
 .candidate-avatar--sm {
   width: 32px !important;
@@ -2320,6 +2382,55 @@ kbd {
   color: var(--text);
 }
 .opening-btn--batch:hover { background: var(--bg); border-color: var(--primary); color: var(--primary); }
+.opening-btn--results {
+  width: 100%;
+  background: #f0fdf4;
+  color: #059669;
+  border-color: #a7f3d0;
+  margin-top: 2px;
+}
+.opening-btn--results:hover { background: #059669; color: #fff; border-color: #059669; }
+/* Opening context banner (Single / Batch pages) */
+.opening-context-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--primary-dim);
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  padding: 8px 14px;
+  margin-bottom: 16px;
+  font-size: 0.82rem;
+}
+.opening-context-bar--empty {
+  background: var(--card);
+  border-color: var(--border);
+}
+.opening-context-label {
+  flex: 1;
+  font-weight: 600;
+  color: var(--primary);
+}
+.opening-context-clear {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0 2px;
+  line-height: 1;
+}
+.opening-context-clear:hover { color: var(--text-1); }
+.opening-context-select {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-1);
+  font-size: 0.8rem;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
 .opening-new-card {
   border: 2px dashed var(--border);
   border-radius: 10px;

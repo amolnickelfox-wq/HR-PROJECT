@@ -44,7 +44,8 @@
       "Bash(Select-Object FullName)",
       "Bash(Sort-Object FullName)",
       "Bash(python -m py_compile app.py)",
-      "Bash(xargs grep -l \"BatchSection\\\\|from.*BatchSection\")"
+      "Bash(xargs grep -l \"BatchSection\\\\|from.*BatchSection\")",
+      "Bash(npx --yes tsc --noEmit --jsx react)"
     ]
   }
 }

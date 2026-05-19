@@ -7,8 +7,8 @@ import anthropic as _anthropic
 
 load_dotenv()
 _claude_key   = os.getenv("CLAUDE_API_KEY")
-claude_client = _anthropic.Anthropic(api_key=_claude_key) if _claude_key else None
-CLAUDE_MODEL  = "claude-sonnet-4-6"
+claude_client = _anthropic.Anthropic(api_key=_claude_key, timeout=60.0) if _claude_key else None
+CLAUDE_MODEL  = "claude-haiku-4-5-20251001"
 
 
 def _claude(system: str, prompt: str) -> str:

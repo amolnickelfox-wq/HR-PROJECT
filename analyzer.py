@@ -1,6 +1,7 @@
 import re
 import os
 import json
+import hashlib
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ load_dotenv()
 try:
     import anthropic as _anthropic
     _key = os.getenv("CLAUDE_API_KEY")
-    claude_client = _anthropic.Anthropic(api_key=_key) if _key else None
+    claude_client = _anthropic.Anthropic(api_key=_key, timeout=60.0) if _key else None
 except ImportError:
     claude_client = None
 
@@ -24,6 +25,7 @@ def _claude(system: str, prompt: str) -> str:
     resp = claude_client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=2048,
+        temperature=0,
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -302,49 +304,69 @@ RESUME:
     return json.loads(_strip_markdown_json(raw))
 
 
-def _grok_analyze(resume_text: str, jd_text: str) -> dict:
-    prompt = f"""You are a senior technical recruiter. Analyze the resume against the job description.
-Score the candidate out of 100 using this breakdown:
-- skill_match: 0-40 pts (how many required skills the candidate has)
-- experience_relevance: 0-30 pts (years and relevance of experience)
-- project_relevance: 0-20 pts (how relevant their projects are to the JD)
-- education: 0-10 pts (education level and field relevance)
-
-Return a JSON object with EXACTLY these keys (no extras, no missing):
-{{
-  "name": "string or null",
-  "email": "string or null",
-  "phone": "string or null",
-  "skills": ["all skills found in resume"],
-  "experience_years": "~X.X years or null",
-  "match_score": "XX / 100",
-  "matching_skills": ["skills from resume that match JD requirements"],
-  "missing_skills": ["required skills from JD not found in resume"],
-  "experience_fit": "Good or Average or Poor",
-  "reason": "2-3 sentence explanation of the overall verdict",
-  "education": ["education entry strings"] or null,
-  "projects": ["project name strings"] or null,
-  "roles": ["Job Title  —  Company | Start – End"] or null,
-  "email_valid": true or false,
-  "phone_valid": true or false,
-  "score_breakdown": {{
-    "skill_match":          {{"score": 0-40, "max": 40, "weight": "40%"}},
-    "experience_relevance": {{"score": 0-30, "max": 30, "weight": "30%"}},
-    "project_relevance":    {{"score": 0-20, "max": 20, "weight": "20%"}},
-    "education":            {{"score": 0-10, "max": 10, "weight": "10%"}}
-  }}
-}}
-
-Return valid JSON only, no markdown, no extra text.
-
-RESUME:
-{resume_text}
+def _extract_jd_skills(jd_text: str) -> list[str]:
+    """Extract required skills from JD using Claude for accuracy."""
+    prompt = f"""List every technical skill, tool, language, or framework required or preferred in this job description.
+Return a JSON array of lowercase strings only. No markdown, no extra text.
 
 JOB DESCRIPTION:
 {jd_text}"""
-
-    raw = _claude("You are a senior technical recruiter. Return only valid JSON.", prompt)
+    raw = _claude("You are a technical recruiter. Return only a valid JSON array of skill strings.", prompt)
     return json.loads(_strip_markdown_json(raw))
+
+
+def _grok_analyze(resume_text: str, jd_text: str) -> dict:
+    # Step 1: Claude extracts facts (no scoring — just reading)
+    parsed = _grok_parse(resume_text)
+
+    # Step 2: Claude extracts required skills from JD
+    try:
+        jd_skills = _extract_jd_skills(jd_text)
+    except Exception:
+        jd_skills = extract_skills(jd_text)
+
+    resume_skills = parsed.get("skills") or []
+
+    # Step 3: Fixed Python formulas — same rules for every resume
+    s_skill, matching_skills, missing_skills = score_skills(resume_skills, jd_skills)
+    exp_years = parsed.get("experience_years")
+    s_exp  = score_experience(exp_years, jd_text)
+    s_proj = score_projects(resume_text, jd_text)
+    s_edu  = score_education(resume_text)
+    total  = min(100, s_skill + s_exp + s_proj + s_edu)
+
+    candidate_exp = _exp_numeric(exp_years)
+    exp_fit = get_experience_fit(candidate_exp, jd_text)
+    reason  = generate_reason(
+        parsed.get("name"), total, matching_skills, missing_skills, exp_fit, exp_years
+    )
+
+    email_ok = validate_email(parsed.get("email"))
+    phone_ok = validate_phone(parsed.get("phone"))
+
+    return {
+        "name":             parsed.get("name"),
+        "email":            parsed.get("email") if email_ok else None,
+        "phone":            parsed.get("phone") if phone_ok else None,
+        "skills":           resume_skills,
+        "experience_years": exp_years,
+        "match_score":      f"{total} / 100",
+        "matching_skills":  matching_skills,
+        "missing_skills":   missing_skills,
+        "experience_fit":   exp_fit,
+        "reason":           reason,
+        "education":        parsed.get("education"),
+        "projects":         parsed.get("projects"),
+        "roles":            parsed.get("roles"),
+        "email_valid":      email_ok,
+        "phone_valid":      phone_ok,
+        "score_breakdown": {
+            "skill_match":          {"score": s_skill, "max": 40, "weight": "40%"},
+            "experience_relevance": {"score": s_exp,   "max": 30, "weight": "30%"},
+            "project_relevance":    {"score": s_proj,  "max": 20, "weight": "20%"},
+            "education":            {"score": s_edu,   "max": 10, "weight": "10%"},
+        },
+    }
 
 
 # ─────────────────────────────────────────────
@@ -371,10 +393,20 @@ def parse_resume(resume_text: str) -> dict:
     }
 
 
+_analyze_cache: dict = {}
+
+
 def analyze(resume_text: str, jd_text: str) -> dict:
+    cache_key = hashlib.md5((resume_text + jd_text).encode()).hexdigest()
+    if cache_key in _analyze_cache:
+        print(f"[Analyzer] cache hit {cache_key[:8]}")
+        return _analyze_cache[cache_key]
+
     if claude_client:
         try:
-            return _grok_analyze(resume_text, jd_text)
+            result = _grok_analyze(resume_text, jd_text)
+            _analyze_cache[cache_key] = result
+            return result
         except Exception as e:
             print(f"[Grok analyze fallback] {e}")
 

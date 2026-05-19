@@ -6,7 +6,7 @@ import CandidateCard  from './CandidateCard'
 import ReasonBox      from './ReasonBox'
 import InterviewPanel from './InterviewPanel'
 
-export default function BatchCandidateModal({ candidate, onClose }) {
+export default function BatchCandidateModal({ candidate, onClose, onCallCandidate }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKey)
@@ -24,6 +24,7 @@ export default function BatchCandidateModal({ candidate, onClose }) {
     score_result: candidate.score_result,
     transcript:   candidate.transcript,
     fail_reason:  candidate.fail_reason,
+    call_log:     candidate.call_log,
   }
 
   return (
@@ -95,6 +96,25 @@ export default function BatchCandidateModal({ candidate, onClose }) {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {candidate.interview_status === 'retry_queued' && (
+                <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: '0.82rem', color: '#92400e' }}>
+                  🔄 Call not answered — will retry after the queue completes
+                </div>
+              )}
+
+              {onCallCandidate && candidate.phone &&
+               candidate.filter_status !== 'no_phone' && (
+                <div style={{ marginBottom: 16 }}>
+                  <button
+                    className="btn-analyze"
+                    style={{ fontSize: '0.85rem', padding: '9px 20px' }}
+                    onClick={() => { onCallCandidate(candidate); onClose() }}
+                  >
+                    📞 Call Candidate
+                  </button>
                 </div>
               )}
 

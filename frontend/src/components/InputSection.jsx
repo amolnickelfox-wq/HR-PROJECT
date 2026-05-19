@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 
 // ── batch file helpers ──
 const ACCEPTED_EXT = ['.pdf', '.docx', '.doc']
@@ -75,13 +75,14 @@ function PageIntro({ mode }) {
 // Main component
 // ─────────────────────────────────────────────
 export default function InputSection({
-  onAnalyze, loading, error,
+  onAnalyze, onClear, loading, error,
   batchFiles, onBatchFilesChange, onBatchStart, batchLoading, batchError,
   mode = 'single', // 'single' | 'batch'
   defaultJd = '',
 }) {
   const [resume,     setResume]     = useState('')
   const [jd,         setJd]         = useState(defaultJd)
+  useEffect(() => { if (defaultJd) setJd(defaultJd) }, [defaultJd])
   const [uploading,  setUploading]  = useState(false)
   const [fileName,   setFileName]   = useState('')
   const [uploadErr,  setUploadErr]  = useState('')
@@ -104,6 +105,7 @@ export default function InputSection({
 
   // ── submit ──
   const handleSubmit = useCallback(() => {
+    if (loading || batchLoading) return
     if (isBatch) {
       if (!jd.trim() || !batchFiles.length) return
       onBatchStart(batchFiles, jd)
@@ -111,15 +113,16 @@ export default function InputSection({
       if (!resume.trim() || !jd.trim()) return
       onAnalyze(resume, jd)
     }
-  }, [isBatch, batchFiles, jd, resume, onBatchStart, onAnalyze])
+  }, [loading, batchLoading, isBatch, batchFiles, jd, resume, onBatchStart, onAnalyze])
 
   const handleKeyDown = useCallback((e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleSubmit()
   }, [handleSubmit])
 
   const handleClear = () => {
-    setResume(''); setJd(''); setFileName(''); setUploadErr('')
+    setResume(''); setJd(defaultJd || ''); setFileName(''); setUploadErr('')
     if (isBatch) onBatchFilesChange([])
+    onClear?.()
   }
 
   // ── single-file upload ──
@@ -326,7 +329,7 @@ export default function InputSection({
               : <>⚡ Analyze Candidate</>
           }
         </button>
-        <button className="btn-clear" onClick={handleClear} disabled={loading || batchLoading}>
+        <button className="btn-clear" onClick={handleClear}>
           Clear
         </button>
       </div>

@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-import os, uuid, io, html, time, threading, traceback, re
+import os, uuid, io, html, time, threading, traceback, re, json
 import anthropic as _anthropic
 from datetime import datetime
 from typing import List
@@ -27,12 +27,22 @@ from analyzer    import analyze, parse_resume
 from interviewer import generate_questions, transcribe_recording, score_interview, start_twilio_call
 
 
+# ─── In-memory only — no file persistence ────────────────────────────────────
+def _save_store():       pass   # no-op
+def _load_store():       pass
+def _save_batch_store(): pass
+def _load_batch_store(): pass
+
+def _reschedule_pending_callbacks():
+    pass  # no persistent store — callbacks are in-memory only
+
+
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     if _SCHEDULER_OK:
         _scheduler.start()
-        print("[Startup] APScheduler started — callback scheduling enabled")
+        print("[Startup] APScheduler started (in-memory) — callback scheduling enabled")
     try:
         r = _httpx.get("http://localhost:4040/api/tunnels", timeout=2)
         tunnels = r.json().get("tunnels", [])
@@ -58,6 +68,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 interview_store: dict = {}
 batch_store:     dict = {}
 
+COMPANY_NAME = os.getenv("COMPANY_NAME", "our company")
+
 DEFAULT_QUESTIONS = [
     "Tell me a bit about yourself and what brought you to apply for this role.",
     "What do you know about this position and why does it interest you?",
@@ -70,6 +82,43 @@ DEFAULT_QUESTIONS = [
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def _extract_job_title(jd_text: str) -> str:
+    """Extract job title from JD — tries labelled patterns first, then Claude, then first line."""
+    # 1. Look for explicit label patterns
+    label_patterns = [
+        r'(?:job\s+title|position\s+title|role\s+title|title)\s*[:\-]\s*(.+)',
+        r'(?:position|role|opening)\s*[:\-]\s*(.+)',
+        r'(?:we\s+are\s+(?:hiring|looking)\s+for|seeking)\s+(?:a\s+|an\s+)?(.+?)(?:\s+to\b|\s+who\b|\s*[.,]|$)',
+        r'(?:vacancy|opening)\s+for\s+(?:a\s+|an\s+)?(.+?)(?:\s*[.,]|$)',
+    ]
+    for line in jd_text.split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for pat in label_patterns:
+            m = re.search(pat, stripped, re.IGNORECASE)
+            if m:
+                title = m.group(1).strip().rstrip('.,;:').strip()
+                if 3 <= len(title) <= 80:
+                    return title[:60]
+
+    # 2. Claude extraction (fast, haiku)
+    claude_key = os.getenv("CLAUDE_API_KEY")
+    if claude_key:
+        try:
+            client = _anthropic.Anthropic(api_key=claude_key)
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=20,
+                system="Extract only the job title from the job description. Reply with only the job title — no other words.",
+                messages=[{"role": "user", "content": jd_text[:600]}],
+            )
+            title = resp.content[0].text.strip().strip('"\'').rstrip('.,;:')
+            if 3 <= len(title) <= 80:
+                return title[:60]
+        except Exception:
+            pass
+
+    # 3. Fallback: first non-empty line ≤ 80 chars
     for line in jd_text.split('\n'):
         line = line.strip()
         if line and len(line) <= 80:
@@ -145,22 +194,30 @@ def _detect_consent(text: str) -> bool:
 
 
 def _parse_callback_time(raw: str) -> str | None:
-    """Use Claude to convert spoken callback time into an ISO datetime string."""
+    """Use Claude to convert spoken callback time into an ISO datetime string.
+    Handles absolute times ('tomorrow at 3pm', 'Friday at 2') and
+    relative times ('after 30 minutes', 'in an hour', 'call me tonight')."""
     claude_key = os.getenv("CLAUDE_API_KEY")
     if not claude_key:
         return None
     try:
         client = _anthropic.Anthropic(api_key=claude_key)
+        now = datetime.now()
         prompt = (
             f"The candidate said: \"{raw}\"\n"
-            f"Today is {datetime.now().strftime('%A, %d %B %Y, %I:%M %p')} IST.\n"
-            "Return ONLY an ISO 8601 datetime string (e.g. 2025-05-14T15:00:00) "
-            "for the time they mentioned. If you cannot parse it, return the word null."
+            f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p')} IST.\n\n"
+            "Convert what they said into an exact ISO 8601 datetime (e.g. 2025-05-14T15:00:00).\n"
+            "Handle all of these correctly:\n"
+            "- Relative: 'after 30 minutes' → now + 30 min, 'in an hour' → now + 1 hour, 'in 2 hours' → now + 2 hours\n"
+            "- Today: 'today at 5pm' → today 17:00, 'tonight at 8' → today 20:00\n"
+            "- Named day: 'tomorrow at 3pm' → tomorrow 15:00, 'Friday at 2pm' → next Friday 14:00\n"
+            "- Vague: 'morning' → next day 10:00, 'afternoon' → next day 14:00, 'evening' → next day 18:00\n"
+            "Return ONLY the ISO 8601 string. If you truly cannot interpret it, return the word null."
         )
         resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=50,
-            system="Return only an ISO 8601 datetime string or the word null.",
+            model="claude-haiku-4-5-20251001",
+            max_tokens=30,
+            system="Return only an ISO 8601 datetime string or the word null. No explanation.",
             messages=[{"role": "user", "content": prompt}],
         )
         dt_str = resp.content[0].text.strip().strip('"\'')
@@ -176,23 +233,36 @@ def _trigger_callback_call(interview_id: str):
     """Re-dial the candidate at the APScheduler-scheduled callback time."""
     data = interview_store.get(interview_id)
     if not data:
+        print(f"[Callback] interview_id {interview_id} not found in store — skipping")
         return
+    existing_log = data.get("call_log", [])
     data.update({
         "status":                "calling",
         "consent_status":        "pending",
         "consent_raw":           None,
+        "consent_re_asked":      False,
         "callback_time_raw":     None,
         "callback_scheduled_at": None,
         "recordings":            {},
+        "transcriptions":        {},
         "repeat_counts":         {},
         "transcript":            None,
         "score_result":          None,
+        "fail_reason":           None,
+        "call_log":              existing_log + [{
+            "attempt":    len(existing_log) + 1,
+            "started_at": datetime.now().isoformat(),
+            "status":     "calling",
+            "is_callback": True,
+        }],
     })
+    _save_store()
     try:
         start_twilio_call(data["phone"], interview_id)
         print(f"[Callback] Re-calling {data['phone']} for {interview_id}")
     except Exception as e:
         data["status"] = "failed"
+        _save_store()
         print(f"[Callback] Failed to re-call: {e}")
 
 
@@ -209,6 +279,7 @@ class InterviewRequest(BaseModel):
     resume_text: str
     jd_text: str
     candidate_name: str | None = None
+    job_title: str | None = None
 
 class SimulateRequest(BaseModel):
     resume_text: str
@@ -333,11 +404,13 @@ async def start_interview(req: InterviewRequest):
         "phone":                 req.phone,
         "questions":             questions,
         "jd_text":               req.jd_text,
-        "job_title":             _extract_job_title(req.jd_text),
+        "job_title":             (req.job_title.strip() if req.job_title and req.job_title.strip() else _extract_job_title(req.jd_text)),
         "recordings":            {},
+        "transcriptions":        {},
         "repeat_counts":         {},
         "transcript":            None,
         "score_result":          None,
+        "call_log":              [{"attempt": 1, "started_at": datetime.now().isoformat(), "status": "calling"}],
     }
 
     try:
@@ -346,6 +419,7 @@ async def start_interview(req: InterviewRequest):
         del interview_store[interview_id]
         raise HTTPException(500, f"Failed to initiate call: {e}")
 
+    _save_store()
     return {"interview_id": interview_id, "call_id": interview_id, "status": "calling", "questions": questions}
 
 
@@ -371,20 +445,24 @@ async def twilio_start(interview_id: str):
     if not data:
         return _hangup_xml()
 
-    name       = data.get("candidate_name") or "there"
-    safe_name  = html.escape(name)
-    safe_title = html.escape(data.get("job_title", "the position"))
-    base_url   = os.getenv("BASE_URL", "").rstrip("/")
+    name        = data.get("candidate_name") or "there"
+    safe_name   = html.escape(name.split()[0])   # first name only — more natural
+    safe_title  = html.escape(data.get("job_title", "the open position"))
+    safe_co     = html.escape(COMPANY_NAME)
+    base_url    = os.getenv("BASE_URL", "").rstrip("/")
     data["consent_status"] = "pending"
 
     return _xml(
         f"<Response>"
-        f"<Gather input='speech' speechTimeout='1' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
+        f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
         f"<Say voice='Google.en-IN-Neural2-A'>"
-        f"Hello {safe_name}. I am calling from the HR team at Nickelfox Technologies "
-        f"regarding your application for the {safe_title} role. "
-        f"Before we begin, I just want to check — is this a good time for the interview? "
-        f"Please say yes or no."
+        f"Hello, may I speak with {safe_name}? "
+        f"<break time='500ms'/>"
+        f"Hi {safe_name}! This is Sarah calling from the HR team at {safe_co}. "
+        f"I'm reaching out regarding your application for the {safe_title} role. "
+        f"<break time='300ms'/>"
+        f"I'd like to conduct a quick phone screening interview with you — it should take around 5 to 7 minutes. "
+        f"Is this a good time to talk?"
         f"</Say>"
         f"</Gather>"
         f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
@@ -432,8 +510,8 @@ async def twilio_consent(
             data["consent_re_asked"] = True
             return _xml(
                 f"<Response>"
-                f"<Gather input='speech' speechTimeout='1' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
-                f"<Say voice='Google.en-IN-Neural2-A'>Sorry, I didn't catch that. Is this a good time for the interview? Please say yes or no.</Say>"
+                f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
+                f"<Say voice='Google.en-IN-Neural2-A'>I'm sorry, I didn't quite catch that. Could you please say yes if you're ready, or no if now isn't a good time?</Say>"
                 f"</Gather>"
                 f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
                 f"</Response>"
@@ -449,10 +527,23 @@ async def twilio_consent(
         data["consent_status"] = "accepted"
         return _xml(
             f"<Response>"
-            f"<Say voice='Google.en-IN-Neural2-A'>Great! Question 1. {safe_q0}</Say>"
+            f"<Say voice='Google.en-IN-Neural2-A'>"
+            f"Wonderful, thank you {safe_name}! "
+            f"<break time='300ms'/>"
+            f"So here is how this works — I will ask you {total} questions one by one. "
+            f"After you finish answering each question, please press the hash key, that is the pound sign, to move on to the next one. "
+            f"If you need me to repeat a question at any point, just say the word repeat and I will ask it again. "
+            f"Take your time with each answer — there is no rush. "
+            f"<break time='500ms'/>"
+            f"Alright, let us begin! "
+            f"<break time='400ms'/>"
+            f"Question 1 of {total}. "
+            f"<break time='300ms'/>"
+            f"{safe_q0}"
+            f"</Say>"
             f"<Record"
             f"  action='{base_url}/twilio/answer/{interview_id}/0'"
-            f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
+            f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
             f"/>"
             f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/0</Redirect>"
             f"</Response>"
@@ -461,14 +552,13 @@ async def twilio_consent(
         data["consent_status"] = "declined"
         return _xml(
             f"<Response>"
+            f"<Gather input='speech' speechTimeout='4' action='{base_url}/twilio/callback-time/{interview_id}' method='POST'>"
             f"<Say voice='Google.en-IN-Neural2-A'>"
-            f"No problem at all! Could you let us know what time works better for you? "
-            f"Please say the day and time after the beep."
+            f"Absolutely, no problem at all! "
+            f"Could you let me know when would be a better time to call you back? "
+            f"You can say something like — in 30 minutes, today at 5 PM, or tomorrow morning."
             f"</Say>"
-            f"<Record"
-            f"  action='{base_url}/twilio/callback-time/{interview_id}'"
-            f"  maxLength='15' playBeep='true' timeout='10'"
-            f"/>"
+            f"</Gather>"
             f"<Redirect method='POST'>{base_url}/twilio/callback-time/{interview_id}</Redirect>"
             f"</Response>"
         )
@@ -477,25 +567,37 @@ async def twilio_consent(
 @app.api_route("/twilio/callback-time/{interview_id}", methods=["GET", "POST"])
 async def twilio_callback_time(
     interview_id: str,
+    SpeechResult: str = Form(default=None),
     RecordingUrl: str = Form(default=None),
 ):
-    """Records callback time, parses it with Claude, schedules re-call via APScheduler."""
+    """Receives callback time via Gather speech (instant) or Record fallback, schedules re-call."""
     data = interview_store.get(interview_id)
     if not data:
         return _hangup_xml()
 
-    raw_time = ""
-    if RecordingUrl:
+    # Gather gives SpeechResult instantly — no transcription needed
+    raw_time = SpeechResult or ""
+    if not raw_time and RecordingUrl:
         try:
             raw_time = transcribe_recording(RecordingUrl)
-            print(f"[CallbackTime] interview={interview_id} raw='{raw_time}'")
+            print(f"[CallbackTime] interview={interview_id} transcribed='{raw_time}'")
         except Exception as e:
             print(f"[CallbackTime] transcription failed: {e}")
+
+    print(f"[CallbackTime] interview={interview_id} raw='{raw_time}'")
 
     data["callback_time_raw"] = raw_time
     dt_str = _parse_callback_time(raw_time) if raw_time else None
     data["callback_scheduled_at"] = dt_str
     data["status"] = "callback_scheduled"
+
+    # Mark the current call_log entry as callback_scheduled (not left as "calling")
+    call_log = data.get("call_log", [])
+    if call_log:
+        call_log[-1]["status"]   = "callback_scheduled"
+        call_log[-1]["ended_at"] = datetime.now().isoformat()
+        if dt_str:
+            call_log[-1]["callback_scheduled_at"] = dt_str
 
     if dt_str and _SCHEDULER_OK:
         try:
@@ -506,10 +608,13 @@ async def twilio_callback_time(
                 args=[interview_id],
                 id=f"callback_{interview_id}",
                 replace_existing=True,
+                misfire_grace_time=3600,
             )
             print(f"[Callback] Scheduled {interview_id} at {dt_str}")
         except Exception as e:
             print(f"[Callback] Schedule failed: {e}")
+
+    _save_store()
 
     if dt_str:
         try:
@@ -552,22 +657,33 @@ async def twilio_answer(
         questions     = data["questions"]
         total         = len(questions)
         base_url      = os.getenv("BASE_URL", "").rstrip("/")
-        repeat_counts = data.setdefault("repeat_counts", {})
-        duration      = int(RecordingDuration or "0")
+        duration = int(RecordingDuration or "0")
 
         print(f"[Twilio answer] interview={interview_id} q={q_idx}/{total-1} duration={duration}s")
 
-        remind_key = f"reminded_{q_idx}"
-
-        # ── Silence reminder ──────────────────────────────────────────────────
-        # Fires once per question when the recording looks like silence:
-        #   duration < 2  → pressed # immediately without speaking
-        #   4 ≤ duration ≤ 6 → 5-second silence timeout triggered
-        if RecordingUrl and not repeat_counts.get(remind_key):
-            is_silent = duration < 2 or (4 <= duration <= 6)
-            if is_silent:
-                repeat_counts[remind_key] = True
-                print(f"[Twilio answer] silence detected (duration={duration}s) — playing reminder for q={q_idx}")
+        # ── Silence detection ─────────────────────────────────────────────────
+        # Never advance on silence — always re-prompt and re-record same question.
+        #   duration < 2  → pressed # immediately (no speech) → hint to say repeat
+        #   13 ≤ dur ≤ 17 → 15s silence timeout fired         → hint to press #
+        if RecordingUrl:
+            is_immediate_silence = duration < 2
+            is_timeout_silence   = 13 <= duration <= 17
+            if is_immediate_silence:
+                print(f"[Twilio answer] immediate silence q={q_idx} — prompting repeat hint")
+                return _xml(
+                    f"<Response>"
+                    f"<Say voice='Google.en-IN-Neural2-A'>"
+                    f"Please say repeat after the beep to hear the question again."
+                    f"</Say>"
+                    f"<Record"
+                    f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
+                    f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
+                    f"/>"
+                    f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
+                    f"</Response>"
+                )
+            if is_timeout_silence:
+                print(f"[Twilio answer] timeout silence q={q_idx} — prompting hash hint")
                 return _xml(
                     f"<Response>"
                     f"<Say voice='Google.en-IN-Neural2-A'>"
@@ -575,52 +691,58 @@ async def twilio_answer(
                     f"</Say>"
                     f"<Record"
                     f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
-                    f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='10'"
+                    f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
                     f"/>"
                     f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
                     f"</Response>"
                 )
 
-        # ── Repeat detection — only for short recordings ───────────────────────
-        if RecordingUrl and duration <= 5:
-            import concurrent.futures
+            # ── Repeat detection ──────────────────────────────────────────────
+            # Transcribe inline so we know if the candidate said "repeat".
+            # Cache the transcription so _process_interview skips re-downloading.
+            quick_text = None
+            is_repeat  = False
             try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    future = ex.submit(transcribe_recording, RecordingUrl)
-                    transcript = future.result(timeout=5)
-                print(f"[Twilio answer] transcript: '{transcript}'")
-            except Exception:
-                transcript = ""
+                quick_text = transcribe_recording(RecordingUrl + ".mp3")
+                print(f"[Twilio answer] q={q_idx} transcript: {quick_text[:100]!r}")
+                is_repeat = any(kw in quick_text.lower() for kw in REPEAT_KEYWORDS)
+            except Exception as te:
+                print(f"[Twilio answer] inline transcription failed (skipping repeat check): {te}")
 
-            words     = transcript.lower().split()
-            is_repeat = (len(words) <= 12 and any(kw in transcript.lower() for kw in REPEAT_KEYWORDS))
-
-            if is_repeat and repeat_counts.get(q_idx, 0) < 2:
-                repeat_counts[q_idx] = repeat_counts.get(q_idx, 0) + 1
-                print(f"[Twilio answer] repeat requested (count={repeat_counts[q_idx]}) for q={q_idx}")
+            if is_repeat:
+                print(f"[Twilio answer] repeat detected q={q_idx} — re-asking")
+                safe_q = html.escape(questions[q_idx])
                 return _xml(
                     f"<Response>"
-                    f"<Say voice='Google.en-IN-Neural2-A'>Sure. {html.escape(questions[q_idx])}</Say>"
+                    f"<Say voice='Google.en-IN-Neural2-A'>"
+                    f"Of course! <break time='400ms'/>"
+                    f"Question {q_idx+1} of {total}. <break time='300ms'/>{safe_q}"
+                    f"</Say>"
                     f"<Record"
                     f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
-                    f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
+                    f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
                     f"/>"
                     f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
                     f"</Response>"
                 )
 
-        if RecordingUrl:
-            data["recordings"][q_idx] = RecordingUrl
+            # Save recording + cached transcription (avoids re-download during scoring)
+            data["recordings"][q_idx] = RecordingUrl + ".mp3"
+            if quick_text:
+                data["transcriptions"][q_idx] = quick_text
 
         next_q = q_idx + 1
         if next_q < total:
             print(f"[Twilio answer] advancing to q={next_q}")
+            safe_next_q = html.escape(questions[next_q])
             return _xml(
                 f"<Response>"
-                f"<Say voice='Google.en-IN-Neural2-A'>Question {next_q+1} of {total}. {html.escape(questions[next_q])}</Say>"
+                f"<Say voice='Google.en-IN-Neural2-A'>"
+                f"Question {next_q+1} of {total}. <break time='300ms'/>{safe_next_q}"
+                f"</Say>"
                 f"<Record"
                 f"  action='{base_url}/twilio/answer/{interview_id}/{next_q}'"
-                f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
+                f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
                 f"/>"
                 f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{next_q}</Redirect>"
                 f"</Response>"
@@ -671,47 +793,83 @@ async def twilio_status_callback(interview_id: str, request: Request, background
         return {"status": "ok"}
 
     recordings = data.get("recordings", {})
+    call_log   = data.get("call_log", [])
+    now_iso    = datetime.now().isoformat()
     if call_status in ("no-answer", "busy"):
         data["status"]      = "failed"
         data["fail_reason"] = "Call not answered" if call_status == "no-answer" else "Candidate's line was busy"
+        if call_log:
+            call_log[-1].update({"status": "failed", "ended_at": now_iso, "fail_reason": data["fail_reason"]})
     elif len(recordings) == 0:
         data["status"]      = "abandoned"
         data["fail_reason"] = "Candidate disconnected before answering any question"
+        if call_log:
+            call_log[-1].update({"status": "abandoned", "ended_at": now_iso})
     else:
         data["status"] = "processing"
+        if call_log:
+            call_log[-1]["status"] = "processing"
         background_tasks.add_task(_process_interview, interview_id)
 
+    _save_store()
     return {"status": "ok"}
 
 
 # ─── Background: Transcribe + Score ──────────────────────────────────────────
 def _process_interview(interview_id: str):
-    """Download each recording → transcribe → score with Claude."""
+    """Download each recording in parallel → transcribe → score with Claude."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     data = interview_store.get(interview_id)
     if not data:
         return
 
     questions  = data["questions"]
     recordings = data.get("recordings", {})
-    lines      = []
+    total      = len(questions)
 
     # Prepend consent exchange to transcript
+    lines = []
     consent_raw = data.get("consent_raw")
     if consent_raw:
         lines.append(f"Interviewer: Is this a good time for the interview?\nCandidate: {consent_raw}")
 
-    for i, question in enumerate(questions):
+    # Transcribe all recordings in parallel
+    done_count = 0
+    answers    = {}
+
+    cached_transcriptions = data.get("transcriptions", {})
+
+    def transcribe_one(i):
+        if i in cached_transcriptions:
+            return i, cached_transcriptions[i]
         rec_url = recordings.get(i)
-        if rec_url:
-            try:
-                answer = transcribe_recording(rec_url)
-            except Exception as e:
-                answer = f"[transcription error: {e}]"
-        else:
-            answer = "[no recording]"
-        lines.append(f"Q{i+1}: {question}\nA{i+1}: {answer}")
+        if not rec_url:
+            return i, "[no recording]"
+        try:
+            return i, transcribe_recording(rec_url)
+        except Exception as e:
+            return i, f"[transcription error: {e}]"
+
+    data["processing_step"] = f"Transcribing 0 / {total}"
+    _save_store()
+
+    with ThreadPoolExecutor(max_workers=min(total, 6)) as pool:
+        futures = {pool.submit(transcribe_one, i): i for i in range(total)}
+        for fut in as_completed(futures):
+            i, answer = fut.result()
+            answers[i] = answer
+            done_count += 1
+            data["processing_step"] = f"Transcribing {done_count} / {total}"
+            _save_store()
+
+    for i, question in enumerate(questions):
+        lines.append(f"Q{i+1}: {question}\nA{i+1}: {answers.get(i, '[no recording]')}")
 
     full_transcript = "\n\n".join(lines)
+
+    data["processing_step"] = "Scoring interview…"
+    _save_store()
 
     try:
         score_result = score_interview(full_transcript, questions, data["jd_text"])
@@ -728,20 +886,60 @@ def _process_interview(interview_id: str):
             "summary":            f"Scoring failed: {e}",
         }
 
+    call_log = data.get("call_log", [])
+    if call_log and call_log[-1].get("status") in ("processing", "calling"):
+        call_log[-1]["status"] = "completed"
+        call_log[-1].setdefault("ended_at", datetime.now().isoformat())
+
     interview_store[interview_id] = {
         **data,
         "status":       "completed",
         "transcript":   full_transcript,
         "score_result": score_result,
+        "call_log":     call_log,
     }
+    _save_store()
+
+
+@app.post("/interview/recall/{interview_id}")
+async def recall_interview(interview_id: str):
+    """Re-dial a candidate using their existing interview session and questions."""
+    data = interview_store.get(interview_id)
+    if not data:
+        raise HTTPException(404, "Interview session not found — server may have restarted.")
+
+    existing_log = data.get("call_log", [])
+    data.update({
+        "status":                "calling",
+        "consent_status":        "pending",
+        "consent_raw":           None,
+        "consent_re_asked":      False,
+        "recordings":            {},
+        "transcriptions":        {},
+        "transcript":            None,
+        "score_result":          None,
+        "fail_reason":           None,
+        "callback_time_raw":     None,
+        "callback_scheduled_at": None,
+        "call_log":              existing_log + [{"attempt": len(existing_log) + 1, "started_at": datetime.now().isoformat(), "status": "calling"}],
+    })
+
+    try:
+        start_twilio_call(data["phone"], interview_id)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to initiate call: {e}")
+
+    _save_store()
+    return {"interview_id": interview_id, "status": "calling"}
 
 
 # ─── Batch Pipeline ───────────────────────────────────────────────────────────
 @app.post("/batch/start")
 async def batch_start(
     background_tasks: BackgroundTasks,
-    files:   List[UploadFile] = File(...),
-    jd_text: str = Form(...),
+    files:     List[UploadFile] = File(...),
+    jd_text:   str = Form(...),
+    job_title: str = Form(default=''),
 ):
     if not jd_text.strip():
         raise HTTPException(400, "Job description is required.")
@@ -780,10 +978,12 @@ async def batch_start(
         "batch_id":   batch_id,
         "status":     "processing",
         "jd_text":    jd_text,
+        "job_title":  job_title.strip() if job_title.strip() else _extract_job_title(jd_text),
         "total":      len(candidates),
         "completed":  0,
         "candidates": candidates,
     }
+    _save_batch_store()
     background_tasks.add_task(_process_batch, batch_id)
     return {"batch_id": batch_id, "total": len(candidates), "status": "processing"}
 
@@ -793,10 +993,24 @@ async def batch_status(batch_id: str):
     data = batch_store.get(batch_id)
     if not data:
         raise HTTPException(404, "Batch not found.")
-    candidates_out = [
-        {k: v for k, v in c.items() if k not in ("resume_text", "_batch_done")}
-        for c in data["candidates"]
-    ]
+    candidates_out = []
+    for c in data["candidates"]:
+        cd = {k: v for k, v in c.items() if k not in ("resume_text", "_batch_done")}
+        iid = c.get("interview_id")
+        if iid and iid in interview_store:
+            iv = interview_store[iid]
+            cd["call_log"] = iv.get("call_log", [])
+            # Sync live interview state so batch view reflects real call outcome
+            iv_status = iv.get("status")
+            if iv_status and iv_status != "calling":
+                cd["interview_status"]      = iv_status
+                cd["fail_reason"]           = iv.get("fail_reason")
+                cd["score_result"]          = iv.get("score_result")
+                cd["transcript"]            = iv.get("transcript")
+                cd["questions"]             = iv.get("questions")
+                cd["callback_scheduled_at"] = iv.get("callback_scheduled_at")
+                cd["processing_step"]       = iv.get("processing_step")
+        candidates_out.append(cd)
     return {
         "batch_id":  data["batch_id"],
         "status":    data["status"],
@@ -840,122 +1054,75 @@ def _process_batch(batch_id: str):
     for t in threads: t.start()
     for t in threads: t.join()
 
-    # ── helper: place one call and block until terminal state ────────────────
-    terminal = {"completed", "abandoned", "failed", "callback_scheduled"}
-
-    def _call_and_wait(cand: dict, is_retry: bool = False):
-        """Place a Twilio call for cand and block until it reaches a terminal state.
-        Returns True if the interview completed/abandoned (got answers), False otherwise."""
-        label = f"[Retry] {cand.get('name')}" if is_retry else cand.get('name')
-
-        interview_id = str(uuid.uuid4())
-        try:
-            questions = generate_questions(cand["resume_text"], jd_text)
-        except Exception:
-            questions = DEFAULT_QUESTIONS[:]
-
-        interview_store[interview_id] = {
-            "interview_id":          interview_id,
-            "status":                "calling",
-            "consent_status":        "pending",
-            "consent_raw":           None,
-            "callback_time_raw":     None,
-            "callback_scheduled_at": None,
-            "candidate_name":        cand["name"],
-            "phone":                 cand["phone"],
-            "questions":             questions,
-            "jd_text":               jd_text,
-            "job_title":             _extract_job_title(jd_text),
-            "recordings":            {},
-            "repeat_counts":         {},
-            "transcript":            None,
-            "score_result":          None,
-        }
-
-        try:
-            start_twilio_call(cand["phone"], interview_id)
-            cand["interview_id"]     = interview_id
-            cand["interview_status"] = "calling"
-            print(f"[Batch] Calling {label} — waiting for result...")
-        except Exception as e:
-            print(f"[Batch] Call failed for {label}: {e}")
-            cand["interview_status"] = "failed"
-            return False
-
-        for _ in range(120):   # 120 × 15s = 30 min max
-            iv        = interview_store.get(interview_id, {})
-            iv_status = iv.get("status", "unknown")
-            cand["interview_status"] = iv_status
-
-            if iv_status in terminal:
-                if iv_status == "callback_scheduled":
-                    cand["callback_scheduled_at"] = iv.get("callback_scheduled_at")
-                    cand["callback_time_raw"]     = iv.get("callback_time_raw")
-                else:
-                    sr = iv.get("score_result")
-                    if sr:
-                        try:
-                            iscore = int(str(sr.get("interview_score", "0/100")).split("/")[0].strip())
-                        except Exception:
-                            iscore = 0
-                        cand["interview_score"] = iscore
-                        cand["score_result"]    = sr
-                        cand["combined_score"]  = round((cand["resume_score"] or 0) * 0.4 + iscore * 0.6, 1)
-                # Persist interview details for the frontend detail modal
-                cand["transcript"]   = iv.get("transcript")
-                cand["questions"]    = iv.get("questions", [])
-                cand["fail_reason"]  = iv.get("fail_reason")
-                print(f"[Batch] {label} → {iv_status}")
-                return iv_status not in ("failed",)
-
-            time.sleep(15)
-
-        # timeout
-        cand["interview_status"] = "timeout"
-        print(f"[Batch] {label} timed out after 30 min")
-        return False
-
-    # ── Phase 3: first pass — call every qualified candidate ─────────────────
-    no_answer_retry = []   # candidates who didn't pick up on first attempt
-
-
+    # Mark no-phone qualified candidates
     for cand in candidates:
-        if cand["filter_status"] != "qualified":
-            cand["interview_status"] = "skipped"
-            data["completed"] += 1
-            continue
-        if not cand.get("phone"):
+        if cand["filter_status"] == "qualified" and not cand.get("phone"):
             cand["filter_status"]    = "no_phone"
             cand["interview_status"] = "no_phone"
-            data["completed"] += 1
-            continue
 
-        _call_and_wait(cand)
+    data["completed"] = len(candidates)
+    data["status"]    = "completed"
+    _save_batch_store()
+    print(f"[Batch] Analysis complete — {len(candidates)} candidates ranked. Use Call button to interview.")
 
-        # Queue for retry if they didn't pick up (no-answer or busy)
-        iid = cand.get("interview_id")
-        if iid:
-            fail_reason = interview_store.get(iid, {}).get("fail_reason", "")
-            if cand["interview_status"] == "failed" and fail_reason in (
-                "Call not answered", "Candidate's line was busy"
-            ):
-                no_answer_retry.append(cand)
-                print(f"[Batch] {cand.get('name')} added to retry queue")
-            else:
-                data["completed"] += 1
-        else:
-            data["completed"] += 1
 
-    # ── Phase 4: retry no-answer candidates at the end ───────────────────────
-    if no_answer_retry:
-        print(f"[Batch] Waiting 30s before retrying {len(no_answer_retry)} candidate(s)...")
-        time.sleep(30)
+class BatchCallRequest(BaseModel):
+    file_name: str
 
-        for cand in no_answer_retry:
-            _call_and_wait(cand, is_retry=True)
-            data["completed"] += 1   # count retry result (pass or fail) as final
+@app.post("/batch/{batch_id}/interview/start")
+async def batch_interview_start(batch_id: str, req: BatchCallRequest):
+    """Start a phone interview for a specific candidate in a completed batch."""
+    data = batch_store.get(batch_id)
+    if not data:
+        raise HTTPException(404, "Batch not found.")
 
-    data["status"] = "completed"
+    cand = next((c for c in data["candidates"] if c["file_name"] == req.file_name), None)
+    if not cand:
+        raise HTTPException(404, "Candidate not found in batch.")
+    if not cand.get("phone"):
+        raise HTTPException(400, "Candidate has no phone number.")
+    if not cand.get("resume_text"):
+        raise HTTPException(400, "Resume text unavailable — re-upload this candidate's CV.")
+
+    try:
+        questions = generate_questions(cand["resume_text"], data["jd_text"])
+    except Exception:
+        questions = DEFAULT_QUESTIONS[:]
+
+    interview_id = str(uuid.uuid4())
+    interview_store[interview_id] = {
+        "interview_id":          interview_id,
+        "status":                "calling",
+        "consent_status":        "pending",
+        "consent_raw":           None,
+        "consent_re_asked":      False,
+        "callback_time_raw":     None,
+        "callback_scheduled_at": None,
+        "candidate_name":        cand.get("name"),
+        "phone":                 cand["phone"],
+        "questions":             questions,
+        "jd_text":               data["jd_text"],
+        "job_title":             data.get("job_title") or _extract_job_title(data["jd_text"]),
+        "recordings":            {},
+        "transcriptions":        {},
+        "repeat_counts":         {},
+        "transcript":            None,
+        "score_result":          None,
+        "fail_reason":           None,
+        "call_log":              [{"attempt": 1, "started_at": datetime.now().isoformat(), "status": "calling"}],
+    }
+
+    try:
+        start_twilio_call(cand["phone"], interview_id)
+    except Exception as e:
+        del interview_store[interview_id]
+        raise HTTPException(500, f"Failed to initiate call: {e}")
+
+    cand["interview_id"]     = interview_id
+    cand["interview_status"] = "calling"
+    _save_store()
+    _save_batch_store()
+    return {"interview_id": interview_id, "status": "calling"}
 
 
 # ─── Diagnostic ───────────────────────────────────────────────────────────────

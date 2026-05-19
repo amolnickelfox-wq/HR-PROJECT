@@ -8,29 +8,55 @@ function scoreColor(n) {
   return 'batch-score-low'
 }
 
+function fmtCallbackTime(iso) {
+  try {
+    const d = new Date(iso)
+    return `📅 ${d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} · ${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
+  } catch { return '📅 Callback Scheduled' }
+}
+
 function StatusBadge({ c }) {
-  if (c.filter_status === 'filtered_out') {
-    return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>Filtered Out</span>
-  }
+  const iid = c.interview_status
+  const hasActiveCall = iid && iid !== 'pending'
+
+  // no_phone is always terminal
   if (c.filter_status === 'no_phone') {
     return <span className="score-verdict" style={{ fontSize: '0.7rem', color: 'var(--text-3)' }}>No Phone</span>
   }
-  if (c.interview_status === 'callback_scheduled') {
-    let label = '📅 Callback'
-    if (c.callback_scheduled_at) {
-      try {
-        const d = new Date(c.callback_scheduled_at)
-        label = `📅 ${d.toLocaleDateString('en-IN', { weekday: 'short' })} ${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
-      } catch (_) {}
-    } else if (c.callback_time_raw) {
-      label = `📅 "${c.callback_time_raw}"`
-    }
+  // filtered_out: only show if no call has ever been made
+  if (c.filter_status === 'filtered_out' && !hasActiveCall) {
+    return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>Filtered Out</span>
+  }
+  if (iid === 'callback_scheduled') {
+    const label = c.callback_scheduled_at
+      ? fmtCallbackTime(c.callback_scheduled_at)
+      : c.callback_time_raw
+      ? `📅 "${c.callback_time_raw}"`
+      : '📅 Callback Scheduled'
     return <span className="score-verdict verdict-medium" style={{ fontSize: '0.7rem' }}>{label}</span>
   }
-  if (c.interview_status === 'failed' || c.interview_status === 'abandoned') {
-    return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>Call Failed</span>
+  if (iid === 'calling' || iid === 'in_progress') {
+    return <span className="score-verdict verdict-medium" style={{ fontSize: '0.7rem' }}>📞 Calling…</span>
   }
-  if (c.interview_status === 'timeout') {
+  if (iid === 'processing') {
+    const step = c.processing_step
+    return <span className="score-verdict verdict-medium" style={{ fontSize: '0.7rem' }}>⚙ {step || 'Processing…'}</span>
+  }
+  if (iid === 'retry_queued') {
+    return <span className="score-verdict verdict-medium" style={{ fontSize: '0.7rem' }}>🔄 Retry Queued</span>
+  }
+  if (iid === 'abandoned') {
+    return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>📵 Call Dropped</span>
+  }
+  if (iid === 'failed') {
+    const r = (c.fail_reason || '').toLowerCase()
+    if (r.includes('not answered'))
+      return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>📵 Not Answered</span>
+    if (r.includes('busy'))
+      return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>📵 Line Busy</span>
+    return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>✕ Call Failed</span>
+  }
+  if (iid === 'timeout') {
     return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>Timed Out</span>
   }
   const verdict = c.score_result?.verdict
@@ -43,7 +69,7 @@ function StatusBadge({ c }) {
   return <span className="score-verdict" style={{ fontSize: '0.7rem', color: 'var(--text-3)' }}>—</span>
 }
 
-export default function BatchResultsTable({ candidates, isComplete = true }) {
+export default function BatchResultsTable({ candidates, isComplete = true, onCallCandidate }) {
   const [selected, setSelected] = useState(null)
 
   const sorted = [...candidates].sort((a, b) => {
@@ -85,6 +111,7 @@ export default function BatchResultsTable({ candidates, isComplete = true }) {
               <th>Interview Score</th>
               <th>Combined</th>
               <th>Status</th>
+              {onCallCandidate && <th></th>}
             </tr>
           </thead>
           <tbody>
@@ -99,8 +126,13 @@ export default function BatchResultsTable({ candidates, isComplete = true }) {
                       {(c.name || c.file_name || '?')[0].toUpperCase()}
                     </div>
                     <div>
-                      <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-1)' }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-1)', display: 'flex', alignItems: 'center', gap: 6 }}>
                         {c.name || '—'}
+                        {c._duplicate_of && (
+                          <span title="This candidate was already in this opening" style={{ fontSize: '0.65rem', background: '#fef3c7', color: '#92400e', borderRadius: 4, padding: '1px 5px', fontWeight: 600 }}>
+                            duplicate
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontSize: '0.72rem', color: 'var(--text-3)' }}>
                         {c.email || c.file_name}
@@ -139,6 +171,19 @@ export default function BatchResultsTable({ candidates, isComplete = true }) {
                 <td>
                   <StatusBadge c={c} />
                 </td>
+                {onCallCandidate && (
+                  <td onClick={e => e.stopPropagation()}>
+                    {c.phone && c.filter_status !== 'no_phone' && (
+                      <button
+                        className={`batch-call-btn${c.filter_status === 'filtered_out' ? ' batch-call-btn--filtered' : ''}`}
+                        title={c.filter_status === 'filtered_out' ? 'Call (below threshold)' : 'Call Candidate'}
+                        onClick={() => onCallCandidate(c)}
+                      >
+                        {c.filter_status === 'filtered_out' ? '📞' : '📞 Call'}
+                      </button>
+                    )}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -146,7 +191,11 @@ export default function BatchResultsTable({ candidates, isComplete = true }) {
       </div>
 
       {selected && (
-        <BatchCandidateModal candidate={selected} onClose={() => setSelected(null)} />
+        <BatchCandidateModal
+          candidate={selected}
+          onClose={() => setSelected(null)}
+          onCallCandidate={onCallCandidate}
+        />
       )}
     </div>
   )
