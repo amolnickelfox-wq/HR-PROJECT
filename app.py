@@ -68,7 +68,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 interview_store: dict = {}
 batch_store:     dict = {}
 
-COMPANY_NAME = os.getenv("COMPANY_NAME", "our company")
+COMPANY_NAME = os.getenv("COMPANY_NAME", "Nickelfox Technologies")
 
 DEFAULT_QUESTIONS = [
     "Tell me a bit about yourself and what brought you to apply for this role.",
@@ -107,7 +107,7 @@ def _extract_job_title(jd_text: str) -> str:
         try:
             client = _anthropic.Anthropic(api_key=claude_key)
             resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-4-5",
                 max_tokens=20,
                 system="Extract only the job title from the job description. Reply with only the job title — no other words.",
                 messages=[{"role": "user", "content": jd_text[:600]}],
@@ -173,7 +173,7 @@ def _detect_consent(text: str) -> bool:
         try:
             client = _anthropic.Anthropic(api_key=claude_key)
             resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-4-5",
                 max_tokens=5,
                 system="You classify spoken responses. Reply with only the word YES or NO.",
                 messages=[{"role": "user", "content":
@@ -215,7 +215,7 @@ def _parse_callback_time(raw: str) -> str | None:
             "Return ONLY the ISO 8601 string. If you truly cannot interpret it, return the word null."
         )
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=30,
             system="Return only an ISO 8601 datetime string or the word null. No explanation.",
             messages=[{"role": "user", "content": prompt}],
@@ -234,6 +234,9 @@ def _trigger_callback_call(interview_id: str):
     data = interview_store.get(interview_id)
     if not data:
         print(f"[Callback] interview_id {interview_id} not found in store — skipping")
+        return
+    if data.get("status") != "callback_scheduled":
+        print(f"[Callback] {interview_id} already handled (status={data.get('status')}) — skipping auto-dial")
         return
     existing_log = data.get("call_log", [])
     data.update({
@@ -489,6 +492,8 @@ async def twilio_consent(
         return _hangup_xml()
 
     base_url  = os.getenv("BASE_URL", "").rstrip("/")
+    name      = data.get("candidate_name") or "there"
+    safe_name = html.escape(name.split()[0])
     questions = data["questions"]
     total     = len(questions)
     safe_q0   = html.escape(questions[0])
@@ -543,7 +548,7 @@ async def twilio_consent(
             f"</Say>"
             f"<Record"
             f"  action='{base_url}/twilio/answer/{interview_id}/0'"
-            f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
+            f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
             f"/>"
             f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/0</Redirect>"
             f"</Response>"
@@ -644,6 +649,7 @@ async def twilio_answer(
     RecordingUrl:      str = Form(default=None),
     RecordingDuration: str = Form(default=None),
     CallSid:           str = Form(default=None),
+    Digits:            str = Form(default=None),
 ):
     """Twilio posts here after each answer is recorded. Checks repeat, saves, advances."""
     try:
@@ -654,52 +660,65 @@ async def twilio_answer(
         if CallSid:
             data["twilio_call_sid"] = CallSid
 
-        questions     = data["questions"]
-        total         = len(questions)
-        base_url      = os.getenv("BASE_URL", "").rstrip("/")
-        duration = int(RecordingDuration or "0")
+        questions = data["questions"]
+        total     = len(questions)
+        base_url  = os.getenv("BASE_URL", "").rstrip("/")
+        duration  = int(RecordingDuration or "0")
 
-        print(f"[Twilio answer] interview={interview_id} q={q_idx}/{total-1} duration={duration}s")
+        print(f"[Twilio answer] interview={interview_id} q={q_idx}/{total-1} duration={duration}s digits={Digits!r}")
 
-        # ── Silence detection ─────────────────────────────────────────────────
-        # Never advance on silence — always re-prompt and re-record same question.
-        #   duration < 2  → pressed # immediately (no speech) → hint to say repeat
-        #   13 ≤ dur ≤ 17 → 15s silence timeout fired         → hint to press #
-        if RecordingUrl:
-            is_immediate_silence = duration < 2
-            is_timeout_silence   = 13 <= duration <= 17
-            if is_immediate_silence:
-                print(f"[Twilio answer] immediate silence q={q_idx} — prompting repeat hint")
+        # ── Silence / timeout detection ───────────────────────────────────────
+        # Digits == "#"  → candidate pressed # to finish  → valid answer, skip all checks
+        # Digits is None/empty → recording ended by timeout → apply silence rules
+        if RecordingUrl and not Digits:
+            is_pressed_hash_silent = duration < 2
+            is_never_spoke         = 2 <= duration <= 6
+            is_spoke_then_paused   = duration > 6
+
+            if is_pressed_hash_silent or is_never_spoke:
+                retries = data["repeat_counts"].get(q_idx, 0) + 1
+                data["repeat_counts"][q_idx] = retries
+                if retries < 3:
+                    print(f"[Twilio answer] silence q={q_idx} retry={retries}/3 — prompting repeat hint")
+                    return _xml(
+                        f"<Response>"
+                        f"<Say voice='Google.en-IN-Neural2-A'>"
+                        f"Please say repeat after the beep to hear the question again."
+                        f"</Say>"
+                        f"<Record"
+                        f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
+                        f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
+                        f"/>"
+                        f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
+                        f"</Response>"
+                    )
+                else:
+                    # 3 silent attempts — mark skipped and fall through to advance
+                    print(f"[Twilio answer] silence q={q_idx} max retries — marking no answer")
+                    data["transcriptions"][q_idx] = "[no answer provided]"
+
+            elif is_spoke_then_paused:
+                print(f"[Twilio answer] spoke then 5s silence q={q_idx} — prompting press # hint")
                 return _xml(
                     f"<Response>"
                     f"<Say voice='Google.en-IN-Neural2-A'>"
-                    f"Please say repeat after the beep to hear the question again."
+                    f"Please press hash to complete your answer."
                     f"</Say>"
                     f"<Record"
                     f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
-                    f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
+                    f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
                     f"/>"
                     f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
                     f"</Response>"
                 )
-            if is_timeout_silence:
-                print(f"[Twilio answer] timeout silence q={q_idx} — prompting hash hint")
-                return _xml(
-                    f"<Response>"
-                    f"<Say voice='Google.en-IN-Neural2-A'>"
-                    f"Please press hash after completing your answer."
-                    f"</Say>"
-                    f"<Record"
-                    f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
-                    f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
-                    f"/>"
-                    f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
-                    f"</Response>"
-                )
 
-            # ── Repeat detection ──────────────────────────────────────────────
-            # Transcribe inline so we know if the candidate said "repeat".
-            # Cache the transcription so _process_interview skips re-downloading.
+        # ── Transcription + repeat detection ─────────────────────────────────
+        # Only runs if we don't already have a cached result for this question.
+        # Sets status="processing" as a lock before transcribing so that the
+        # Twilio status callback (which may fire concurrently) sees "processing"
+        # and skips launching a duplicate _process_interview.
+        if RecordingUrl and not data["transcriptions"].get(q_idx):
+            data["status"] = "processing"   # race-condition lock
             quick_text = None
             is_repeat  = False
             try:
@@ -710,6 +729,7 @@ async def twilio_answer(
                 print(f"[Twilio answer] inline transcription failed (skipping repeat check): {te}")
 
             if is_repeat:
+                data["status"] = "calling"  # reset lock — interview continues
                 print(f"[Twilio answer] repeat detected q={q_idx} — re-asking")
                 safe_q = html.escape(questions[q_idx])
                 return _xml(
@@ -720,16 +740,20 @@ async def twilio_answer(
                     f"</Say>"
                     f"<Record"
                     f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
-                    f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
+                    f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
                     f"/>"
                     f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{q_idx}</Redirect>"
                     f"</Response>"
                 )
 
-            # Save recording + cached transcription (avoids re-download during scoring)
+            # Valid answer — save recording + transcription
             data["recordings"][q_idx] = RecordingUrl + ".mp3"
             if quick_text:
                 data["transcriptions"][q_idx] = quick_text
+
+            # Reset lock for non-final questions (interview still in progress)
+            if q_idx + 1 < total:
+                data["status"] = "calling"
 
         next_q = q_idx + 1
         if next_q < total:
@@ -742,7 +766,7 @@ async def twilio_answer(
                 f"</Say>"
                 f"<Record"
                 f"  action='{base_url}/twilio/answer/{interview_id}/{next_q}'"
-                f"  maxLength='300' playBeep='true' finishOnKey='#' timeout='15'"
+                f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
                 f"/>"
                 f"<Redirect method='POST'>{base_url}/twilio/answer/{interview_id}/{next_q}</Redirect>"
                 f"</Response>"
@@ -933,6 +957,28 @@ async def recall_interview(interview_id: str):
     return {"interview_id": interview_id, "status": "calling"}
 
 
+# ─── Callbacks ───────────────────────────────────────────────────────────────
+@app.get("/callbacks/due")
+async def callbacks_due():
+    """Return all interviews whose scheduled callback time has arrived."""
+    now = datetime.now().isoformat()
+    due = []
+    for iid, iv in interview_store.items():
+        if iv.get("status") != "callback_scheduled":
+            continue
+        scheduled = iv.get("callback_scheduled_at")
+        if scheduled and scheduled <= now:
+            due.append({
+                "interview_id":          iid,
+                "candidate_name":        iv.get("candidate_name"),
+                "phone":                 iv.get("phone"),
+                "job_title":             iv.get("job_title"),
+                "callback_scheduled_at": scheduled,
+                "callback_time_raw":     iv.get("callback_time_raw"),
+            })
+    return {"due": due}
+
+
 # ─── Batch Pipeline ───────────────────────────────────────────────────────────
 @app.post("/batch/start")
 async def batch_start(
@@ -1010,6 +1056,18 @@ async def batch_status(batch_id: str):
                 cd["questions"]             = iv.get("questions")
                 cd["callback_scheduled_at"] = iv.get("callback_scheduled_at")
                 cd["processing_step"]       = iv.get("processing_step")
+                # Populate top-level score fields the table uses
+                if iv_status == "completed" and iv.get("score_result"):
+                    sr = iv["score_result"]
+                    try:
+                        iscore = int(str(sr.get("interview_score", "0")).split("/")[0].strip())
+                    except (ValueError, AttributeError):
+                        iscore = None
+                    if iscore is not None:
+                        cd["interview_score"] = iscore
+                        rscore = c.get("resume_score")
+                        if rscore is not None:
+                            cd["combined_score"] = round(rscore * 0.4 + iscore * 0.6)
         candidates_out.append(cd)
     return {
         "batch_id":  data["batch_id"],

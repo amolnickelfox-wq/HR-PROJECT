@@ -3,7 +3,8 @@ import Sidebar           from './components/Sidebar'
 import InputSection      from './components/InputSection'
 import ResultsDashboard  from './components/ResultsDashboard'
 import BatchProgress     from './components/BatchProgress'
-import BatchResultsTable from './components/BatchResultsTable'
+import BatchResultsTable    from './components/BatchResultsTable'
+import CallbackAlertModal  from './components/CallbackAlertModal'
 
 const safeJson = async (res) => {
   try { return await res.json() } catch { return {} }
@@ -39,10 +40,11 @@ export default function App() {
   const [batchLoading, setBatchLoading] = useState(false)
   const [batchError,   setBatchError]   = useState('')
 
-  const resultsRef   = useRef(null)
-  const pollRef      = useRef(null)
-  const batchPollRef = useRef(null)
-  const abortRef     = useRef(null)
+  const resultsRef       = useRef(null)
+  const pollRef          = useRef(null)
+  const batchPollRef     = useRef(null)
+  const abortRef         = useRef(null)
+  const callbackAlertRef = useRef(null)
 
   // ── all-time stats (localStorage) ──
   const [allTime, setAllTime] = useState(() => {
@@ -81,7 +83,9 @@ export default function App() {
   const [editingOpeningId, setEditingOpeningId]  = useState(null)
   const [editingJd,        setEditingJd]         = useState('')
   const [viewingOpeningId, setViewingOpeningId]  = useState(null)
-  const [duplicateModal,   setDuplicateModal]    = useState(null)
+  const [duplicateModal,      setDuplicateModal]      = useState(null)
+  const [dueCallbacks,        setDueCallbacks]        = useState([])
+  const [dismissedCallbacks,  setDismissedCallbacks]  = useState({})
   const currentSingleIdRef = useRef(null)
 
   const addAllTime = (delta) => {
@@ -375,6 +379,21 @@ export default function App() {
     if (batchFiles.length > 0 && activePage === 'single') setActivePage('batch')
   }, [batchFiles.length])
 
+  // Poll /callbacks/due every 60 s to alert HR about due callbacks
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch('/callbacks/due')
+        if (!res.ok) return
+        const data = await res.json()
+        setDueCallbacks(data.due || [])
+      } catch (_) {}
+    }
+    poll()
+    callbackAlertRef.current = setInterval(poll, 60_000)
+    return () => clearInterval(callbackAlertRef.current)
+  }, [])
+
   // ── navigation handler ──
   const handleNavigate = (page) => {
     setActivePage(page)
@@ -389,7 +408,7 @@ export default function App() {
     setError('')
     setResult(null)
     setInterview(null)
-    clearInterval(pollRef.current)
+    clearTimeout(pollRef.current)
   }
 
   const handleAnalyze = async (rText, jText) => {
@@ -463,18 +482,19 @@ export default function App() {
   }
 
   const startPolling = (callId) => {
-    clearInterval(pollRef.current)
-    pollRef.current = setInterval(async () => {
+    clearTimeout(pollRef.current)
+    const tick = async () => {
       try {
         const res = await fetch(`/interview/status/${callId}`)
         if (!res.ok) return
         const data = await res.json()
         setInterview(data)
-        if (['completed', 'abandoned', 'failed', 'callback_scheduled'].includes(data.status)) {
-          clearInterval(pollRef.current)
-        }
+        if (['completed', 'abandoned', 'failed', 'callback_scheduled'].includes(data.status)) return
+        const interval = ['calling', 'processing'].includes(data.status) ? 2500 : 6000
+        pollRef.current = setTimeout(tick, interval)
       } catch (_) {}
-    }, 5000)
+    }
+    pollRef.current = setTimeout(tick, 2500)
   }
 
   // ── batch handlers ──
@@ -614,6 +634,11 @@ export default function App() {
   const callbackCandidates = batchData?.candidates?.filter(c =>
     c.interview_status === 'callback_scheduled'
   ) || []
+  const visibleDueCallbacks = dueCallbacks.filter(cb => {
+    const snoozedAt = dismissedCallbacks[cb.interview_id]
+    if (!snoozedAt) return true
+    return Date.now() - snoozedAt > 10 * 60 * 1000
+  })
 
   return (
     <div className="app-shell">
@@ -1049,6 +1074,22 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {visibleDueCallbacks.length > 0 && (
+        <CallbackAlertModal
+          callbacks={visibleDueCallbacks}
+          onCall={(cb) => {
+            handleCallCandidate({ interview_id: cb.interview_id, phone: cb.phone, file_name: null })
+            setDismissedCallbacks(prev => ({ ...prev, [cb.interview_id]: Date.now() }))
+          }}
+          onSnooze={(cb) => setDismissedCallbacks(prev => ({ ...prev, [cb.interview_id]: Date.now() }))}
+          onDismissAll={() => {
+            const all = {}
+            visibleDueCallbacks.forEach(cb => { all[cb.interview_id] = Date.now() })
+            setDismissedCallbacks(prev => ({ ...prev, ...all }))
+          }}
+        />
       )}
 
     </div>
