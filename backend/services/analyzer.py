@@ -1,16 +1,14 @@
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parents[2] / ".env", override=True)
+
 import re
 import os
 import json
 import hashlib
 from datetime import datetime
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# ─────────────────────────────────────────────
-# Claude client setup
-# ─────────────────────────────────────────────
 try:
     import anthropic as _anthropic
     _key = os.getenv("CLAUDE_API_KEY")
@@ -32,41 +30,26 @@ def _claude(system: str, prompt: str) -> str:
     return resp.content[0].text
 
 
-# ─────────────────────────────────────────────
-# Skills Knowledge Base (used as fallback)
-# ─────────────────────────────────────────────
 SKILLS_DB = [
-    # Programming
     "python", "java", "javascript", "typescript", "c++", "c#", "go", "rust",
     "ruby", "php", "scala", "kotlin", "swift", "r", "matlab", "bash", "shell",
-    # ML / AI
     "machine learning", "deep learning", "nlp", "natural language processing",
     "computer vision", "reinforcement learning", "neural networks", "transformers",
     "bert", "gpt", "llm", "rag", "fine-tuning", "transfer learning",
-    # Frameworks & Libraries
     "tensorflow", "pytorch", "keras", "scikit-learn", "sklearn", "xgboost",
     "lightgbm", "hugging face", "spacy", "nltk", "opencv", "fastai",
     "sentence transformers", "faiss", "langchain",
-    # Web / API
     "fastapi", "flask", "django", "react", "angular", "vue", "node.js",
     "express", "spring boot", "rest api", "graphql",
-    # Cloud & DevOps
     "aws", "azure", "gcp", "google cloud", "docker", "kubernetes", "jenkins",
     "ci/cd", "terraform", "ansible", "linux",
-    # Databases
     "sql", "mysql", "postgresql", "mongodb", "redis", "sqlite",
     "elasticsearch", "cassandra", "nosql",
-    # Data & Tools
     "git", "airflow", "kafka", "spark", "hadoop", "tableau", "power bi",
     "pandas", "numpy", "matplotlib", "seaborn", "jupyter",
-    # Methodologies
     "microservices", "agile", "scrum", "devops", "mlops",
 ]
 
-
-# ─────────────────────────────────────────────
-# Regex Extraction Helpers (fallback)
-# ─────────────────────────────────────────────
 
 def extract_email(text: str) -> str | None:
     match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', text)
@@ -176,10 +159,6 @@ def extract_roles(text: str) -> list[str]:
     return roles or None
 
 
-# ─────────────────────────────────────────────
-# Regex Scoring Helpers (fallback)
-# ─────────────────────────────────────────────
-
 def _exp_numeric(exp_str: str | None) -> float:
     if not exp_str:
         return 0.0
@@ -272,10 +251,6 @@ def generate_reason(name, score, matching, missing, fit, exp):
     )
 
 
-# ─────────────────────────────────────────────
-# Grok-powered functions
-# ─────────────────────────────────────────────
-
 def _strip_markdown_json(raw: str) -> str:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -305,7 +280,6 @@ RESUME:
 
 
 def _extract_jd_skills(jd_text: str) -> list[str]:
-    """Extract required skills from JD using Claude for accuracy."""
     prompt = f"""List every technical skill, tool, language, or framework required or preferred in this job description.
 Return a JSON array of lowercase strings only. No markdown, no extra text.
 
@@ -316,10 +290,8 @@ JOB DESCRIPTION:
 
 
 def _grok_analyze(resume_text: str, jd_text: str) -> dict:
-    # Step 1: Claude extracts facts (no scoring — just reading)
     parsed = _grok_parse(resume_text)
 
-    # Step 2: Claude extracts required skills from JD
     try:
         jd_skills = _extract_jd_skills(jd_text)
     except Exception:
@@ -327,7 +299,6 @@ def _grok_analyze(resume_text: str, jd_text: str) -> dict:
 
     resume_skills = parsed.get("skills") or []
 
-    # Step 3: Fixed Python formulas — same rules for every resume
     s_skill, matching_skills, missing_skills = score_skills(resume_skills, jd_skills)
     exp_years = parsed.get("experience_years")
     s_exp  = score_experience(exp_years, jd_text)
@@ -369,10 +340,6 @@ def _grok_analyze(resume_text: str, jd_text: str) -> dict:
     }
 
 
-# ─────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────
-
 def parse_resume(resume_text: str) -> dict:
     if claude_client:
         try:
@@ -380,7 +347,6 @@ def parse_resume(resume_text: str) -> dict:
         except Exception as e:
             print(f"[Grok parse fallback] {e}")
 
-    # Regex fallback
     return {
         "name":             extract_name(resume_text),
         "email":            extract_email(resume_text),
@@ -410,7 +376,6 @@ def analyze(resume_text: str, jd_text: str) -> dict:
         except Exception as e:
             print(f"[Grok analyze fallback] {e}")
 
-    # Regex fallback
     parsed = parse_resume(resume_text)
     jd_skills     = extract_skills(jd_text)
     resume_skills = parsed["skills"]

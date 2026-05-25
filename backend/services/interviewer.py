@@ -1,11 +1,14 @@
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parents[2] / ".env", override=True)
+
 import os
 import re
 import json
 import httpx
-from dotenv import load_dotenv
 import anthropic as _anthropic
 
-load_dotenv()
 _claude_key   = os.getenv("CLAUDE_API_KEY")
 claude_client = _anthropic.Anthropic(api_key=_claude_key, timeout=60.0) if _claude_key else None
 CLAUDE_MODEL  = "claude-haiku-4-5-20251001"
@@ -22,24 +25,18 @@ def _claude(system: str, prompt: str) -> str:
 
 
 def _strip_json(raw: str) -> str:
-    raw = raw.strip()  
+    raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw.rstrip())
     return raw.strip()
 
 
-# ─────────────────────────────────────────────
-# Dynamic local interview — next turn
-# ─────────────────────────────────────────────
-
 def get_next_question(resume_text: str, jd_text: str, conversation: list[dict], candidate_name: str = None) -> dict:
-    """Return the next interviewer message given conversation history so far."""
     name = candidate_name or "there"
     interviewer_turns = [m for m in conversation if m["role"] == "interviewer"]
     n = len(interviewer_turns)
 
-    # Opening greeting — no Claude needed
     if n == 0:
         greeting = (
             f"Hello {name}! I'm Sarah from the HR team. Thanks for taking the time to speak with me today. "
@@ -47,7 +44,6 @@ def get_next_question(resume_text: str, jd_text: str, conversation: list[dict], 
         )
         return {"next_question": greeting, "is_done": False}
 
-    # Closing after 5 interviewer turns
     if n >= 5:
         closing = (
             "That's everything from my side — thank you so much for your time today. "
@@ -99,7 +95,6 @@ Instructions:
 
 
 def score_conversation(conversation: list[dict], jd_text: str) -> dict:
-    """Score a dynamic voice interview conversation."""
     if not conversation:
         return {
             "interview_score":    "N/A",
@@ -118,10 +113,6 @@ def score_conversation(conversation: list[dict], jd_text: str) -> dict:
     )
     questions = [m["content"] for m in conversation if m["role"] == "interviewer"]
     return score_interview(transcript, questions, jd_text)
-
-# ─────────────────────────────────────────────
-# Step 1 — Generate interview questions via Grok
-# ─────────────────────────────────────────────
 
 
 def generate_questions(resume_text: str, jd_text: str) -> list[str]:
@@ -177,10 +168,6 @@ JOB DESCRIPTION:
     return json.loads(_strip_json(raw))
 
 
-# ─────────────────────────────────────────────
-# Step 2 — Place outbound call via Twilio
-# ─────────────────────────────────────────────
-
 def start_twilio_call(phone_number: str, interview_id: str) -> dict:
     from twilio.rest import Client
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
@@ -191,7 +178,6 @@ def start_twilio_call(phone_number: str, interview_id: str) -> dict:
     if not account_sid or not auth_token or not from_number:
         raise Exception("Twilio credentials missing — set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER in .env")
 
-    # Convert to E.164 format (+91XXXXXXXXXX)
     digits = re.sub(r"\D", "", phone_number)
     if len(digits) == 10:
         to = f"+91{digits}"
@@ -207,47 +193,61 @@ def start_twilio_call(phone_number: str, interview_id: str) -> dict:
         from_=from_number,
         url=f"{base_url}/twilio/start/{interview_id}",
         status_callback=f"{base_url}/twilio/status/{interview_id}",
-        status_callback_event=["completed", "failed", "no-answer", "busy"],
-        timeout=20,   # ring for 20 seconds, then fire no-answer callback
+        status_callback_event=["initiated", "ringing", "answered", "completed"],
+        timeout=20,
         record=True,
     )
     print(f"[Twilio] Call initiated — SID={call.sid}")
     return {"call_sid": call.sid}
 
 
-# ─────────────────────────────────────────────
-# Step 3 — Transcribe recording via Groq Whisper
-# ─────────────────────────────────────────────
-
-def transcribe_recording(recording_url: str) -> str:
+def transcribe_recording(recording_url: str, *, fast: bool = False) -> str:
     groq_key = os.getenv("GROQ_API_KEY")
     if not groq_key:
         return "[transcription skipped — no GROQ_API_KEY set]"
 
-    auth = (os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+    auth  = (os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+    model = "whisper-large-v3-turbo" if fast else "whisper-large-v3"
 
-    audio_resp = httpx.get(
-        recording_url,
-        auth=auth,
-        follow_redirects=True,
-        timeout=60,
-    )
-    audio_resp.raise_for_status()
-    audio_bytes = audio_resp.content
+    import time as _time
+    last_err = None
+    audio_resp = None
+    for attempt in range(3):
+        try:
+            audio_resp = httpx.get(
+                recording_url, auth=auth, follow_redirects=True, timeout=30
+            )
+            if audio_resp.status_code == 404 and attempt < 2:
+                print(f"[Transcribe] recording not ready (attempt {attempt+1}/3) — retrying")
+                _time.sleep(2 ** attempt)
+                continue
+            audio_resp.raise_for_status()
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                print(f"[Transcribe] fetch error (attempt {attempt+1}/3): {e} — retrying")
+                _time.sleep(2 ** attempt)
+    if last_err:
+        raise last_err
 
     from groq import Groq
     client = Groq(api_key=groq_key)
     result = client.audio.transcriptions.create(
-        file=("answer.mp3", audio_bytes),
-        model="whisper-large-v3-turbo",
+        file=("answer.mp3", audio_resp.content),
+        model=model,
         language="en",
+        temperature=0,
+        prompt=(
+            "This is a phone job interview recording in English. "
+            "The candidate is answering HR screening questions about their work experience, "
+            "technical skills, projects, and professional background. "
+            "Transcribe every word exactly as spoken, including filler words."
+        ),
     )
     return result.text.strip()
 
-
-# ─────────────────────────────────────────────
-# Step 4 — Score full interview via Grok
-# ─────────────────────────────────────────────
 
 def score_interview(transcript: str, questions: list[str], jd_text: str) -> dict:
     if not claude_client or not transcript.strip():

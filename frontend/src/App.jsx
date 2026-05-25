@@ -6,9 +6,10 @@ import BatchProgress     from './components/BatchProgress'
 import BatchResultsTable    from './components/BatchResultsTable'
 import CallbackAlertModal  from './components/CallbackAlertModal'
 
-const safeJson = async (res) => {
-  try { return await res.json() } catch { return {} }
-}
+import { useAppContext }  from './context/AppContext'
+import { useAnalyze }    from './hooks/useAnalyze'
+import { useInterview }  from './hooks/useInterview'
+import { useBatch }      from './hooks/useBatch'
 
 const PAGE_TITLES = {
   dashboard:      'Dashboard',
@@ -20,234 +21,82 @@ const PAGE_TITLES = {
 }
 
 export default function App() {
+  const {
+    allTime, addAllTime,
+    openings, setOpenings, saveOpenings,
+    activeOpeningId, setActiveOpening, activeOpening, defaultJd,
+    showOpeningForm, setShowOpeningForm,
+    newOpeningTitle, setNewOpeningTitle,
+    newOpeningJd, setNewOpeningJd,
+    editingOpeningId, setEditingOpeningId,
+    editingJd, setEditingJd,
+    viewingOpeningId, setViewingOpeningId,
+    duplicateModal, setDuplicateModal,
+    dueCallbacks, dismissedCallbacks, setDismissedCallbacks,
+    createOpening, deleteOpening, updateOpeningJd,
+    addSingleToOpening, updateSingleInterviewInOpening,
+    saveOpeningBatch, syncBatchToOpenings,
+    findDuplicateInOpening, candidateStatusLabel,
+  } = useAppContext()
+
   // ── navigation ──
   const [activePage, setActivePage] = useState('dashboard')
 
-  // ── single-candidate state ──
-  const [result,      setResult]      = useState(null)
-  const [loading,     setLoading]     = useState(false)
-  const [error,       setError]       = useState('')
-  const [resumeText,  setResumeText]  = useState('')
-  const [jdText,      setJdText]      = useState('')
-  const [interview,   setInterview]   = useState(null)
-  const [callLoading, setCallLoading] = useState(false)
-  const [callError,   setCallError]   = useState('')
-
-  // ── batch state ──
-  const [batchFiles,   setBatchFiles]   = useState([])
-  const [batchId,      setBatchId]      = useState(null)
-  const [batchData,    setBatchData]    = useState(null)
-  const [batchLoading, setBatchLoading] = useState(false)
-  const [batchError,   setBatchError]   = useState('')
-
   const resultsRef       = useRef(null)
-  const pollRef          = useRef(null)
-  const batchPollRef     = useRef(null)
-  const abortRef         = useRef(null)
-  const callbackAlertRef = useRef(null)
-
-  // ── all-time stats (localStorage) ──
-  const [allTime, setAllTime] = useState(() => {
-    try {
-      const s = localStorage.getItem('recruitai_stats')
-      return s ? JSON.parse(s) : { total: 0, qualified: 0, done: 0, batches: [] }
-    } catch {
-      return { total: 0, qualified: 0, done: 0, batches: [] }
-    }
-  })
+  const currentSingleIdRef = useRef(null)
   const prevResultRef    = useRef(null)
   const prevIvStatusRef  = useRef(null)
 
-  // ── job openings (localStorage) ──
-  const [openings, setOpenings] = useState(() => {
-    try {
-      const s = localStorage.getItem('recruitai_openings')
-      return s ? JSON.parse(s) : []
-    } catch { return [] }
-  })
-  const [activeOpeningId, setActiveOpeningId] = useState(() => {
-    try { return localStorage.getItem('recruitai_activeOpening') || null } catch { return null }
-  })
-  const setActiveOpening = (id) => {
-    setActiveOpeningId(id)
-    try {
-      if (id) localStorage.setItem('recruitai_activeOpening', id)
-      else localStorage.removeItem('recruitai_activeOpening')
-    } catch {}
-  }
-  const activeOpening = openings.find(o => o.id === activeOpeningId) || null
-  const defaultJd = activeOpening?.jd || ''
-  const [showOpeningForm,  setShowOpeningForm]   = useState(false)
-  const [newOpeningTitle,  setNewOpeningTitle]   = useState('')
-  const [newOpeningJd,     setNewOpeningJd]      = useState('')
-  const [editingOpeningId, setEditingOpeningId]  = useState(null)
-  const [editingJd,        setEditingJd]         = useState('')
-  const [viewingOpeningId, setViewingOpeningId]  = useState(null)
-  const [duplicateModal,      setDuplicateModal]      = useState(null)
-  const [dueCallbacks,        setDueCallbacks]        = useState([])
-  const [dismissedCallbacks,  setDismissedCallbacks]  = useState({})
-  const currentSingleIdRef = useRef(null)
-
-  const addAllTime = (delta) => {
-    setAllTime(prev => {
-      const next = {
-        total:     (prev.total     || 0) + (delta.total     || 0),
-        qualified: (prev.qualified || 0) + (delta.qualified || 0),
-        done:      (prev.done      || 0) + (delta.done      || 0),
-        batches:   delta.batchId
-          ? [...(prev.batches || []), delta.batchId]
-          : (prev.batches || []),
+  // ── analyze hook ──
+  const {
+    result, setResult, loading, error,
+    resumeText, jdText,
+    handleAnalyze, clearAnalyze,
+  } = useAnalyze({
+    onAutoSaveJd: (jText) => {
+      if (activeOpeningId && jText.trim()) {
+        const op = openings.find(o => o.id === activeOpeningId)
+        if (op && !op.jd) updateOpeningJd(activeOpeningId, jText.trim())
       }
-      try { localStorage.setItem('recruitai_stats', JSON.stringify(next)) } catch {}
-      return next
-    })
+    },
+  })
+
+  // ── interview hook ──
+  const {
+    interview, setInterview, callLoading, callError,
+    handleStartInterview, clearInterview,
+  } = useInterview()
+
+  // ── batch hook ──
+  const {
+    batchFiles, setBatchFiles,
+    batchId, batchData,
+    batchLoading, batchError,
+    handleBatchStart, handleBatchReset,
+    handleCallCandidate: _handleCallCandidate,
+    startBatchPolling,
+  } = useBatch({
+    onSyncToOpenings: syncBatchToOpenings,
+    onAutoSaveJd: (jd) => {
+      if (activeOpeningId && jd.trim()) {
+        const op = openings.find(o => o.id === activeOpeningId)
+        if (op && !op.jd) updateOpeningJd(activeOpeningId, jd.trim())
+      }
+    },
+    getActiveOpeningTitle: () => openings.find(o => o.id === activeOpeningId)?.title || '',
+    getActiveOpeningId:    () => activeOpeningId || '',
+  })
+
+  const handleCallCandidate = (candidate) =>
+    _handleCallCandidate(candidate, batchId, viewingOpeningId, setOpenings, saveOpenings)
+
+  // ── combined clear ──
+  const handleClearAll = () => {
+    clearAnalyze()
+    clearInterview()
   }
 
-  const resetAllTime = () => {
-    const blank = { total: 0, qualified: 0, done: 0, batches: [] }
-    setAllTime(blank)
-    try { localStorage.setItem('recruitai_stats', JSON.stringify(blank)) } catch {}
-  }
-
-  const saveOpenings = (arr) => {
-    try { localStorage.setItem('recruitai_openings', JSON.stringify(arr)) } catch {}
-  }
-
-  const candidateStatusLabel = (c) => {
-    if (!c) return '—'
-    if (c.filter_status === 'filtered_out') return 'Filtered Out (resume score too low)'
-    if (c.filter_status === 'no_phone') return 'No Phone Number'
-    if (c.interview_status === 'completed') return 'Interview Completed'
-    if (c.interview_status === 'callback_scheduled') return 'Callback Scheduled'
-    if (c.interview_status === 'failed') return 'Call Failed'
-    if (c.interview_status === 'timeout') return 'Call Timed Out'
-    if (c.interview_status === 'abandoned') return 'Candidate Disconnected'
-    if (c.interview_status === 'retry_queued') return 'Retry Queued'
-    if (c.interview_status === 'pending') return 'Awaiting Interview'
-    return 'Pending'
-  }
-
-  const findDuplicateInOpening = (opening, name, email) => {
-    if (!opening?.candidates?.length) return null
-    return opening.candidates.find(c => {
-      const n1 = (name  || '').trim().toLowerCase()
-      const n2 = (c.name || '').trim().toLowerCase()
-      const e1 = (email  || '').trim().toLowerCase()
-      const e2 = (c.email || '').trim().toLowerCase()
-      if (e1 && e2 && e1 === e2) return true
-      if (n1 && n2 && n1 === n2) return true
-      return false
-    }) || null
-  }
-
-  const createOpening = () => {
-    if (!newOpeningTitle.trim()) return
-    const o = {
-      id: Date.now().toString(),
-      title: newOpeningTitle.trim(),
-      jd: newOpeningJd.trim(),
-      createdAt: new Date().toISOString().slice(0, 10),
-      stats: { total: 0, qualified: 0, done: 0 },
-      batchIds: [],
-      candidates: [],
-    }
-    const next = [...openings, o]
-    setOpenings(next); saveOpenings(next)
-    setNewOpeningTitle(''); setNewOpeningJd(''); setShowOpeningForm(false)
-  }
-
-  const deleteOpening = (id) => {
-    const next = openings.filter(o => o.id !== id)
-    setOpenings(next); saveOpenings(next)
-    if (activeOpeningId === id) { setActiveOpening(null); setViewingOpeningId(null) }
-    if (viewingOpeningId === id) setViewingOpeningId(null)
-  }
-
-  const updateOpeningJd = (id, jd) => {
-    const next = openings.map(o => o.id === id ? { ...o, jd } : o)
-    setOpenings(next); saveOpenings(next)
-    setEditingOpeningId(null); setEditingJd('')
-  }
-
-  // Save a single analysis result as a candidate entry in the opening
-  const addSingleToOpening = (openingId, candidateEntry, statsDelta) => {
-    setOpenings(prev => {
-      const next = prev.map(o => {
-        if (o.id !== openingId) return o
-        return {
-          ...o,
-          stats: {
-            total:     (o.stats.total     || 0) + (statsDelta.total     || 0),
-            qualified: (o.stats.qualified || 0) + (statsDelta.qualified || 0),
-            done:      (o.stats.done      || 0),
-          },
-          candidates: [...(o.candidates || []), candidateEntry],
-        }
-      })
-      saveOpenings(next)
-      return next
-    })
-  }
-
-  // Update a single candidate's interview result in the opening (any status change)
-  const updateSingleInterviewInOpening = (openingId, singleId, iv) => {
-    setOpenings(prev => {
-      const next = prev.map(o => {
-        if (o.id !== openingId) return o
-        const iscore = parseInt(
-          (iv.score_result?.interview_score || '0').toString().split('/')[0]
-        ) || 0
-        const isDone = ['completed','abandoned','failed','callback_scheduled'].includes(iv.status)
-        return {
-          ...o,
-          stats: isDone ? { ...o.stats, done: (o.stats.done || 0) + 1 } : o.stats,
-          candidates: (o.candidates || []).map(c => {
-            if (c._singleId !== singleId) return c
-            const rscore = c.resume_score || 0
-            return {
-              ...c,
-              interview_status:      iv.status,
-              interview_score:       iscore || null,
-              combined_score:        iscore > 0 ? Math.round(rscore * 0.4 + iscore * 0.6) : null,
-              score_result:          iv.score_result          || null,
-              transcript:            iv.transcript            || null,
-              questions:             iv.questions             || [],
-              call_log:              iv.call_log              || [],
-              fail_reason:           iv.fail_reason           || null,
-              callback_scheduled_at: iv.callback_scheduled_at || null,
-            }
-          }),
-        }
-      })
-      saveOpenings(next)
-      return next
-    })
-  }
-
-  // Save completed batch candidates to the opening (replaces old entries from same batchId)
-  const saveOpeningBatch = (openingId, batchId, candidates, statsDelta) => {
-    setOpenings(prev => {
-      const next = prev.map(o => {
-        if (o.id !== openingId) return o
-        const stripped = candidates.map(({ resume_text, ...rest }) => ({ ...rest, _batchId: batchId }))
-        const existing = (o.candidates || []).filter(c => c._batchId !== batchId)
-        return {
-          ...o,
-          stats: {
-            total:     (o.stats.total     || 0) + (statsDelta.total     || 0),
-            qualified: (o.stats.qualified || 0) + (statsDelta.qualified || 0),
-            done:      (o.stats.done      || 0) + (statsDelta.done      || 0),
-          },
-          batchIds:   [...(o.batchIds   || []), batchId],
-          candidates: [...existing, ...stripped],
-        }
-      })
-      saveOpenings(next)
-      return next
-    })
-  }
-
-  // Track single-candidate analysis
+  // Track single-candidate analysis → openings
   useEffect(() => {
     if (result && result !== prevResultRef.current) {
       const score    = parseInt(result.match_score) || 0
@@ -294,11 +143,12 @@ export default function App() {
       } else {
         addAllTime(delta)
       }
+      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100)
     }
     prevResultRef.current = result
   }, [result])
 
-  // Track single interview — sync every status change to opening
+  // Track single interview status → openings
   useEffect(() => {
     const s   = interview?.status
     const prev = prevIvStatusRef.current
@@ -311,46 +161,7 @@ export default function App() {
     prevIvStatusRef.current = s
   }, [interview?.status])
 
-  // Sync live interview data from a polled batch back into any matching opening
-  const syncBatchToOpenings = (bid, updatedCandidates) => {
-    setOpenings(prev => {
-      const hasMatch = prev.some(o => o.batchIds?.includes(bid))
-      if (!hasMatch) return prev
-      const next = prev.map(o => {
-        if (!o.batchIds?.includes(bid)) return o
-        return {
-          ...o,
-          candidates: (o.candidates || []).map(c => {
-            if (c._batchId !== bid) return c
-            const u = updatedCandidates.find(uc => uc.file_name === c.file_name)
-            if (!u) return c
-            const iscore = parseInt(
-              (u.score_result?.interview_score || '0').toString().split('/')[0]
-            ) || 0
-            return {
-              ...c,
-              interview_status:      u.interview_status,
-              interview_score:       iscore || c.interview_score || null,
-              combined_score:        iscore > 0
-                ? Math.round((c.resume_score || 0) * 0.4 + iscore * 0.6)
-                : c.combined_score,
-              score_result:          u.score_result          ?? c.score_result,
-              transcript:            u.transcript            ?? c.transcript,
-              questions:             u.questions             ?? c.questions,
-              call_log:              u.call_log              ?? c.call_log,
-              fail_reason:           u.fail_reason           ?? c.fail_reason,
-              callback_scheduled_at: u.callback_scheduled_at ?? c.callback_scheduled_at,
-              processing_step:       u.processing_step       ?? null,
-            }
-          }),
-        }
-      })
-      saveOpenings(next)
-      return next
-    })
-  }
-
-  // Track batch completion (only once per batch_id)
+  // Track batch completion → openings + allTime
   useEffect(() => {
     if (batchData?.status === 'completed' && batchId && !allTime.batches?.includes(batchId)) {
       const bTotal     = batchData.total || 0
@@ -362,7 +173,6 @@ export default function App() {
       if (activeOpeningId) {
         const opening = openings.find(o => o.id === activeOpeningId)
         if (opening && !opening.batchIds?.includes(batchId)) {
-          // Flag duplicates in batch candidates before saving
           const cands = batchData.candidates.map(c => {
             const dup = findDuplicateInOpening(opening, c.name, c.email)
             return dup ? { ...c, _duplicate_of: dup._singleId || dup._batchId || 'existing' } : c
@@ -374,25 +184,10 @@ export default function App() {
     }
   }, [batchData?.status, batchId])
 
-  // Auto-switch to batch page when files are added on single page
+  // Auto-switch to batch page when files added on single page
   useEffect(() => {
     if (batchFiles.length > 0 && activePage === 'single') setActivePage('batch')
   }, [batchFiles.length])
-
-  // Poll /callbacks/due every 60 s to alert HR about due callbacks
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const res = await fetch('/callbacks/due')
-        if (!res.ok) return
-        const data = await res.json()
-        setDueCallbacks(data.due || [])
-      } catch (_) {}
-    }
-    poll()
-    callbackAlertRef.current = setInterval(poll, 60_000)
-    return () => clearInterval(callbackAlertRef.current)
-  }, [])
 
   // ── navigation handler ──
   const handleNavigate = (page) => {
@@ -400,231 +195,16 @@ export default function App() {
     if (page === 'single') setBatchFiles([])
   }
 
-  // ── single-candidate handlers ──
-  const handleClearAll = () => {
-    abortRef.current?.abort()
-    abortRef.current = null
-    setLoading(false)
-    setError('')
-    setResult(null)
-    setInterview(null)
-    clearTimeout(pollRef.current)
-  }
-
-  const handleAnalyze = async (rText, jText) => {
-    abortRef.current?.abort()
-    const ctrl = new AbortController()
-    abortRef.current = ctrl
-    const timer = setTimeout(() => ctrl.abort(), 90000)
-    setLoading(true)
-    setError('')
-    setResult(null)
-    setInterview(null)
-    setResumeText(rText)
-    setJdText(jText)
-    // Auto-save JD to opening if not already stored
-    if (activeOpeningId && jText.trim()) {
-      const op = openings.find(o => o.id === activeOpeningId)
-      if (op && !op.jd) updateOpeningJd(activeOpeningId, jText.trim())
-    }
-    try {
-      const res = await fetch('/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ resume_text: rText, jd_text: jText }),
-        signal: ctrl.signal,
-      })
-      if (!res.ok) {
-        const err = await safeJson(res)
-        throw new Error(err.detail || 'Analysis failed')
-      }
-      const data = await res.json()
-      setResult(data)
-      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100)
-    } catch (e) {
-      if (e.name !== 'AbortError')
-        setError(e.message || 'Something went wrong. Is the backend running?')
-    } finally {
-      clearTimeout(timer)
-      setLoading(false)
-    }
-  }
-
-  const handleStartInterview = async () => {
+  const handleStartInterviewWrapped = () => {
     if (!result?.phone) return
-    setCallLoading(true)
-    setCallError('')
-    setInterview(null)
-    try {
-      const res = await fetch('/interview/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone:          result.phone,
-          resume_text:    resumeText,
-          jd_text:        jdText,
-          candidate_name: result.name,
-          job_title:      openings.find(o => o.id === activeOpeningId)?.title || '',
-        }),
-      })
-      if (!res.ok) {
-        const err = await safeJson(res)
-        throw new Error(err.detail || 'Failed to start interview')
-      }
-      const data = await res.json()
-      setInterview({ ...data })
-      startPolling(data.call_id)
-    } catch (e) {
-      setCallError(e.message || 'Failed to initiate call.')
-    } finally {
-      setCallLoading(false)
-    }
-  }
-
-  const startPolling = (callId) => {
-    clearTimeout(pollRef.current)
-    const tick = async () => {
-      try {
-        const res = await fetch(`/interview/status/${callId}`)
-        if (!res.ok) return
-        const data = await res.json()
-        setInterview(data)
-        if (['completed', 'abandoned', 'failed', 'callback_scheduled'].includes(data.status)) return
-        const interval = ['calling', 'processing'].includes(data.status) ? 2500 : 6000
-        pollRef.current = setTimeout(tick, interval)
-      } catch (_) {}
-    }
-    pollRef.current = setTimeout(tick, 2500)
-  }
-
-  // ── batch handlers ──
-  const handleBatchStart = async (files, jd) => {
-    setBatchLoading(true)
-    setBatchError('')
-    setBatchData(null)
-    // Auto-save JD to opening if not already stored
-    if (activeOpeningId && jd.trim()) {
-      const op = openings.find(o => o.id === activeOpeningId)
-      if (op && !op.jd) updateOpeningJd(activeOpeningId, jd.trim())
-    }
-    const form = new FormData()
-    form.append('jd_text', jd)
-    form.append('job_title', openings.find(o => o.id === activeOpeningId)?.title || '')
-    files.forEach(f => form.append('files', f))
-    try {
-      const res = await fetch('/batch/start', { method: 'POST', body: form })
-      if (!res.ok) {
-        const e = await safeJson(res)
-        throw new Error(e.detail || 'Failed to start batch')
-      }
-      const data = await res.json()
-      setBatchId(data.batch_id)
-      setActivePage('batch')
-      startBatchPolling(data.batch_id)
-    } catch (e) {
-      setBatchError(e.message)
-    } finally {
-      setBatchLoading(false)
-    }
-  }
-
-  const startBatchPolling = (id) => {
-    clearTimeout(batchPollRef.current)
-    const tick = async () => {
-      try {
-        const res = await fetch(`/batch/status/${id}`)
-        if (!res.ok) return
-        const data = await res.json()
-        setBatchData(data)
-        if (data.candidates?.length) syncBatchToOpenings(id, data.candidates)
-        const hasActive = data.candidates?.some(c =>
-          ['calling', 'in_progress', 'processing'].includes(c.interview_status)
-        )
-        if (data.status === 'completed' && !hasActive) return
-        // Poll faster while a call is active or being processed
-        const interval = hasActive || data.status === 'processing' ? 2500 : 6000
-        batchPollRef.current = setTimeout(tick, interval)
-      } catch (_) {}
-    }
-    batchPollRef.current = setTimeout(tick, 2500)
-  }
-
-  const handleBatchReset = () => {
-    clearTimeout(batchPollRef.current)
-    setBatchFiles([])
-    setBatchId(null)
-    setBatchData(null)
-    setBatchError('')
-  }
-
-  const handleCallCandidate = async (candidate) => {
-    if (!candidate.phone) return
-    try {
-      let newIid = candidate.interview_id
-      let res
-
-      if (newIid) {
-        // Already has interview session — re-dial it
-        res = await fetch(`/interview/recall/${newIid}`, { method: 'POST' })
-      } else {
-        // No interview yet — start fresh using batch resume data
-        const bid = candidate._batchId || batchId
-        if (!bid) {
-          alert('Cannot start call: batch ID not found. Please re-run the batch.')
-          return
-        }
-        res = await fetch(`/batch/${bid}/interview/start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file_name: candidate.file_name }),
-        })
-        if (res.ok) {
-          const d = await res.json()
-          newIid = d.interview_id
-        }
-      }
-
-      if (!res.ok) {
-        const err = await safeJson(res)
-        alert(err.detail || 'Failed to start call.')
-        return
-      }
-
-      // Update status in live batch data
-      if (batchData) {
-        setBatchData(prev => ({
-          ...prev,
-          candidates: prev.candidates.map(c =>
-            c.file_name === candidate.file_name
-              ? { ...c, interview_id: newIid, interview_status: 'calling' }
-              : c
-          ),
-        }))
-        const pid = candidate._batchId || batchId
-        if (pid) startBatchPolling(pid)
-      }
-
-      // Update status in opening rankings
-      if (viewingOpeningId) {
-        setOpenings(prev => {
-          const next = prev.map(o => {
-            if (o.id !== viewingOpeningId) return o
-            return {
-              ...o,
-              candidates: (o.candidates || []).map(c =>
-                c.file_name === candidate.file_name
-                  ? { ...c, interview_id: newIid, interview_status: 'calling' }
-                  : c
-              ),
-            }
-          })
-          saveOpenings(next)
-          return next
-        })
-      }
-    } catch (e) {
-      alert(e.message || 'Failed to start call.')
-    }
+    handleStartInterview({
+      phone:          result.phone,
+      resume_text:    resumeText,
+      jd_text:        jdText,
+      candidate_name: result.name,
+      job_title:      openings.find(o => o.id === activeOpeningId)?.title || '',
+      opening_id:     activeOpeningId || null,
+    })
   }
 
   // ── derived values ──
@@ -826,7 +406,7 @@ export default function App() {
                     interview={interview}
                     callLoading={callLoading}
                     callError={callError}
-                    onStartInterview={handleStartInterview}
+                    onStartInterview={handleStartInterviewWrapped}
                   />
                 )}
               </div>
