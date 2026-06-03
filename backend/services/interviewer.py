@@ -17,7 +17,7 @@ CLAUDE_MODEL  = "claude-haiku-4-5-20251001"
 def _claude(system: str, prompt: str) -> str:
     resp = claude_client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2048,
+        max_tokens=2048,  
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -39,25 +39,25 @@ def get_next_question(resume_text: str, jd_text: str, conversation: list[dict], 
 
     if n == 0:
         greeting = (
-            f"Hello {name}! I'm Sarah from the HR team. Thanks for taking the time to speak with me today. "
-            f"I'd love to start by hearing a little about yourself — could you walk me through your background?"
+            f"Hi {name}! This is Sarah from the team at NickelFox Technologies — so glad you could make some time today! "
+            f"I'd love to start by hearing a bit about you. Could you walk me through your background and what you've been up to recently?"
         )
         return {"next_question": greeting, "is_done": False}
 
-    if n >= 5:
+    if n >= 6:
         closing = (
-            "That's everything from my side — thank you so much for your time today. "
-            "It was really great speaking with you. We'll review your responses and be in touch soon. "
-            "Have a wonderful day!"
+            f"That's all the questions I had for today — honestly, it was such a pleasure speaking with you, {name}! "
+            "Our team will review everything and we'll be in touch very soon. "
+            "Wishing you a fantastic rest of your day — take care!"
         )
         return {"next_question": closing, "is_done": True}
 
     if not claude_client:
         fallbacks = [
-            "That's really interesting! What specifically draws you to this particular role?",
-            "Can you tell me about a challenge you faced at work and how you handled it?",
-            "How do you usually approach collaborating with a new team?",
-            "What kind of work environment brings out the best in you?",
+            "That's really interesting — what specifically draws you to this particular role?",
+            "I'd love to hear about a challenge you faced at work and how you handled it.",
+            "How do you usually go about building relationships when you join a new team?",
+            "What kind of environment or work style really brings out the best in you?",
         ]
         return {"next_question": fallbacks[min(n - 1, len(fallbacks) - 1)], "is_done": False}
 
@@ -67,7 +67,7 @@ def get_next_question(resume_text: str, jd_text: str, conversation: list[dict], 
     )
 
     prompt = f"""You are Sarah, a warm and professional HR recruiter on a phone screening call.
-This is turn {n + 1} of a planned 5-turn HR screening interview.
+This is turn {n + 1} of a planned 7-turn HR screening interview.
 
 Your goal: assess the candidate's communication clarity, confidence, motivation, and cultural fit.
 Do NOT ask deep technical questions.
@@ -88,7 +88,7 @@ Instructions:
 - Return ONLY your spoken words. No labels, no JSON, no quotation marks."""
 
     raw = _claude(
-        "You are an HR interviewer named Sarah. Respond only with your next spoken line — no labels or formatting.",
+        "You are Sarah, a warm and empathetic HR interviewer at NickelFox Technologies. Respond only with your next spoken line — conversational, encouraging, and human. No labels or formatting.",
         prompt,
     )
     return {"next_question": raw.strip(), "is_done": False}
@@ -128,35 +128,43 @@ def generate_questions(resume_text: str, jd_text: str) -> list[str]:
 
     prompt = f"""You are a recruiter conducting a structured phone screening. First, read the resume and determine if the candidate is a FRESHER/INTERN (student, recent graduate, little or no work experience) or EXPERIENCED (has significant work experience).
 
-Then generate exactly 6 questions in this fixed order, adapted to their profile:
+Then generate exactly 7 questions in this fixed order, adapted to their profile:
 
-Question 1 — Introduction:
-- Fresher: Ask them to introduce themselves and walk through their academic background and what drew them to this field.
-- Experienced: Ask them to walk through their career journey and what led them to apply for this role.
+Question 1 — Pure Introduction:
+Ask the candidate to simply introduce themselves — just who they are and what they do. Keep it open and warm. Do NOT ask about their journey or history here.
+- Fresher example: "Could you start by telling me a little about yourself?"
+- Experienced example: "Great to connect — could you start by telling me a bit about yourself?"
 
-Question 2 — Motivation / Why this role:
+Question 2 — Background / Journey:
+Now ask them to walk through their background in more depth.
+- Fresher: Ask about their academic background, what they studied, and what drew them to this field.
+- Experienced: Ask them to walk through their career journey and what has brought them to where they are today.
+
+Question 3 — Motivation / Why this role:
 Ask why they are interested in this specific role or company. Reference something specific from the JD.
 
-Question 3 — Behavioural:
+Question 4 — Behavioural:
 - Fresher: Ask about a time they collaborated in a team on an academic project, group assignment, or personal project — how they contributed and what the outcome was.
 - Experienced: Ask about a notable achievement at work, a difficult situation they navigated, or how they adapted to a significant change. Pick whichever fits the resume best.
 
-Question 4 — Technical (Resume-based):
+Question 5 — Technical (Resume-based):
 - Fresher: Ask a concise technical question based on a skill, technology, or concept from their coursework or academic projects. Ask a how/why/what question, not just "tell me about X".
 - Experienced: Ask a concise technical question grounded in a specific technology or experience from their work history. Intermediate depth.
 
-Question 5 — Technical (JD-based):
+Question 6 — Technical (JD-based):
 Ask a concise technical question based on a specific requirement or technology from the JOB DESCRIPTION. Test whether they understand the concept, not just the name. Same depth for both profiles.
 
-Question 6 — Project deep-dive:
+Question 7 — Project deep-dive:
 - Fresher: Pick one specific academic or personal project from their resume (by name). Ask about a challenge they faced, what they built, or what they learned.
 - Experienced: Pick one specific work project from their resume (by name). Ask about a technical challenge, how they solved it, or what they would do differently.
 
 Rules:
-- Keep all questions short and conversational — suitable for a phone call
+- Each question must be a single, complete sentence — aim for under 20 words but NEVER cut a question mid-thought; it must always be grammatically complete and make full sense
+- No multi-part questions — do not combine two questions into one with "and" or follow-up clauses
+- Write in casual, spoken language — as if asking a friend, not writing a formal document
 - Do NOT number the questions
 - Do NOT mention "fresher" or "experienced" in the questions themselves
-- Return a JSON array of exactly 6 question strings. Valid JSON only, no markdown.
+- Return a JSON array of exactly 7 question strings. Valid JSON only, no markdown.
 
 RESUME:
 {resume_text}
@@ -239,12 +247,7 @@ def transcribe_recording(recording_url: str, *, fast: bool = False) -> str:
         model=model,
         language="en",
         temperature=0,
-        prompt=(
-            "This is a phone job interview recording in English. "
-            "The candidate is answering HR screening questions about their work experience, "
-            "technical skills, projects, and professional background. "
-            "Transcribe every word exactly as spoken, including filler words."
-        ),
+        prompt="Interviewer: Tell me about your experience. Candidate:",
     )
     return result.text.strip()
 
@@ -279,7 +282,7 @@ Scoring dimensions and anchors:
 - behavioral_quality (0-15): Quality of situational/example answers — do they describe real situations with outcomes?
   13-15 = specific examples with clear outcomes | 8-12 = decent examples, outcome implied | 3-7 = vague or generic examples | 0-2 = no examples given
 
-Important scoring rule: A competent, reasonably articulate candidate should score 65-75 overall. Only score below 50 if answers are clearly poor. Give benefit of the doubt for natural speech patterns. Do not penalize for being conversational rather than formal.
+Important scoring rule: A competent, reasonably articulate candidate should score 72-82 overall. Only score below 50 if answers are clearly poor. Give benefit of the doubt for natural speech patterns. Do not penalize for being conversational rather than formal.
 
 Interview Questions:
 {questions_text}

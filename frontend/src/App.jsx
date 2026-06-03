@@ -251,7 +251,8 @@ export default function App() {
                         <button className="opening-card-delete"
                           onClick={() => { setEditingOpeningId(op.id); setEditingJd(op.jd || '') }}
                           title="Edit JD">✏️</button>
-                        <button className="opening-card-delete" onClick={() => deleteOpening(op.id)}
+                        <button className="opening-card-delete"
+                          onClick={() => { if (window.confirm(`Delete "${op.title}"? This cannot be undone.`)) deleteOpening(op.id) }}
                           title="Delete opening">✕</button>
                       </div>
                     </div>
@@ -279,16 +280,22 @@ export default function App() {
                     ) : (
                       <>
                         <div className="opening-card-stats">
-                          {[
-                            { v: op.stats.total,     l: 'Analyzed'   },
-                            { v: op.stats.qualified, l: 'Qualified'  },
-                            { v: op.stats.done,      l: 'Interviewed' },
-                          ].map(s => (
-                            <div key={s.l} className="opening-stat">
-                              <div className="opening-stat-value">{s.v}</div>
-                              <div className="opening-stat-label">{s.l}</div>
-                            </div>
-                          ))}
+                          {(() => {
+                            const cands = op.candidates || []
+                            const total     = cands.filter(c => !c._duplicate_of).length
+                            const qualified = cands.filter(c => !c._duplicate_of && c.filter_status === 'qualified').length
+                            const done      = cands.filter(c => !c._duplicate_of && ['completed','abandoned','failed','callback_scheduled','declined'].includes(c.interview_status)).length
+                            return [
+                              { v: total,     l: 'Analyzed'    },
+                              { v: qualified, l: 'Qualified'   },
+                              { v: done,      l: 'Interviewed' },
+                            ].map(s => (
+                              <div key={s.l} className="opening-stat">
+                                <div className="opening-stat-value">{s.v}</div>
+                                <div className="opening-stat-label">{s.l}</div>
+                              </div>
+                            ))
+                          })()}
                         </div>
                         {!op.jd && (
                           <div style={{ fontSize: '0.72rem', color: '#f59e0b', marginBottom: 4 }}>

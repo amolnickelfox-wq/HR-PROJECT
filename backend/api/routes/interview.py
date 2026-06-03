@@ -24,11 +24,44 @@ from backend.app.callbacks import _trigger_callback_call
 
 router = APIRouter()
 
+_TRANSITIONS = [
+    "Got it!",
+    "Sure!",
+    "Great!",
+    "Perfect!",
+    "Noted!",
+]
+
 REPEAT_KEYWORDS = [
     "repeat", "say that again", "again please", "pardon",
     "didn't hear", "didn't understand", "come again", "what was the question",
     "can you repeat", "please repeat",
 ]
+
+
+def _is_repeat_request(text: str) -> bool:
+    claude_key = os.getenv("CLAUDE_API_KEY")
+    if not claude_key:
+        return False
+    try:
+        client = _anthropic.Anthropic(api_key=claude_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=5,
+            system="You classify phone interview responses. Reply YES or NO only.",
+            messages=[{"role": "user", "content":
+                f"A job candidate on a phone screening gave this very short response.\n"
+                f"Did they ask to repeat the question, or is it a real answer?\n\n"
+                f'Response: "{text}"\n\n'
+                f"Reply YES if they want to repeat the question, NO if it is a real answer."
+            }],
+        )
+        result = resp.content[0].text.strip().upper()
+        print(f"[Repeat] Claude classified='{result}' text='{text}'")
+        return result.startswith("Y")
+    except Exception as e:
+        print(f"[Repeat] Claude classification failed: {e}")
+        return False
 
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
@@ -336,7 +369,7 @@ async def interview_stream(interview_id: str):
                 break
             payload = {k: v for k, v in data.items() if k != "jd_text"}
             yield f"data: {json.dumps(payload)}\n\n"
-            if data["status"] in ("completed", "abandoned", "failed", "callback_scheduled"):
+            if data["status"] in ("completed", "abandoned", "failed", "callback_scheduled", "declined"):
                 break
             await asyncio.sleep(0.3)
 
@@ -378,6 +411,27 @@ async def recall_interview(interview_id: str):
     return {"interview_id": interview_id, "status": "calling"}
 
 
+@router.post("/interview/force-resolve/{interview_id}")
+async def force_resolve_interview(interview_id: str, background_tasks: BackgroundTasks):
+    data = interview_store.get(interview_id)
+    if not data:
+        raise HTTPException(404, "Interview not found.")
+    if data["status"] in ("completed", "processing"):
+        return {"interview_id": interview_id, "status": data["status"], "message": "Already resolved."}
+
+    recordings = data.get("recordings", {})
+    if recordings:
+        data["status"] = "processing"
+        _save_interview(interview_id, data)
+        background_tasks.add_task(_process_interview, interview_id)
+        return {"interview_id": interview_id, "status": "processing", "message": "Processing started."}
+    else:
+        data["status"]      = "abandoned"
+        data["fail_reason"] = "Force resolved — no recordings found"
+        _save_interview(interview_id, data)
+        return {"interview_id": interview_id, "status": "abandoned", "message": "Marked as abandoned — no recordings."}
+
+
 @router.get("/callbacks/due")
 async def callbacks_due():
     now = datetime.now().isoformat()
@@ -405,7 +459,7 @@ async def twilio_start(interview_id: str):
     if not data:
         return _hangup_xml()
 
-    COMPANY_NAME = os.getenv("COMPANY_NAME", "Nickelfox Technologies")
+    COMPANY_NAME = os.getenv("COMPANY_NAME", "NickelFox Technologies")
     name        = data.get("candidate_name") or "there"
     safe_name   = html.escape(name.split()[0])
     safe_title  = html.escape(data.get("job_title", "the open position"))
@@ -415,15 +469,16 @@ async def twilio_start(interview_id: str):
 
     return _xml(
         f"<Response>"
-        f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
         f"<Say voice='Google.en-IN-Neural2-A'>"
-        f"Hello, may I speak with {safe_name}? "
+        f"Hello, could I please speak with {safe_name}? "
         f"<break time='500ms'/>"
-        f"Hi {safe_name}! This is Sarah calling from the HR team at {safe_co}. "
+        f"Hi {safe_name}! This is Sarah calling from the HR team at <phoneme alphabet='ipa' ph='nɪkəlfɒks'>NickelFox</phoneme> Technologies. "
         f"I'm reaching out regarding your application for the {safe_title} role. "
         f"<break time='300ms'/>"
-        f"I'd like to conduct a quick phone screening interview with you — it should take around 5 to 7 minutes. "
-        f"Is this a good time to talk?"
+        f"</Say>"
+        f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
+        f"<Say voice='Google.en-IN-Neural2-A'>"
+        f"I'd like to conduct a brief screening round — it should only take about 5 to 7 minutes. Would now be a good time?"
         f"</Say>"
         f"</Gather>"
         f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
@@ -464,7 +519,7 @@ async def twilio_consent(
             return _xml(
                 f"<Response>"
                 f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
-                f"<Say voice='Google.en-IN-Neural2-A'>I'm sorry, I didn't quite catch that. Could you please say yes if you're ready, or no if now isn't a good time?</Say>"
+                f"<Say voice='Google.en-IN-Neural2-A'>Oh, I'm sorry about that — I didn't quite catch your response! Could you let me know — just say yes if you're ready, or no if now isn't the best time?</Say>"
                 f"</Gather>"
                 f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
                 f"</Response>"
@@ -482,16 +537,14 @@ async def twilio_consent(
         return _xml(
             f"<Response>"
             f"<Say voice='Google.en-IN-Neural2-A'>"
-            f"Wonderful, thank you {safe_name}! "
-            f"<break time='300ms'/>"
-            f"So here is how this works — I will ask you {total} questions one by one. "
-            f"After you finish answering each question, please press the hash key, that is the pound sign, to move on to the next one. "
-            f"If you need me to repeat a question at any point, just say the word repeat and I will ask it again. "
-            f"Take your time with each answer — there is no rush. "
-            f"<break time='500ms'/>"
-            f"Alright, let us begin! "
+            f"Thank you, {safe_name} — I appreciate you taking the time. "
+            f"<break time='200ms'/>"
+            f"Just a quick heads up — I'll ask you {total} questions. When you're done answering, press the # key to move ahead. "
+            f"If you need me to repeat anything, just say repeat and I'll ask it again. Take as much time as you need. "
             f"<break time='400ms'/>"
-            f"Question 1 of {total}. "
+            f"Alright, let's get started! "
+            f"<break time='400ms'/>"
+            f"Alright, here's my first question — "
             f"<break time='300ms'/>"
             f"{safe_q0}"
             f"</Say>"
@@ -509,9 +562,9 @@ async def twilio_consent(
             f"<Response>"
             f"<Gather input='speech' speechTimeout='4' action='{base_url}/twilio/callback-time/{interview_id}' method='POST'>"
             f"<Say voice='Google.en-IN-Neural2-A'>"
-            f"Absolutely, no problem at all! "
-            f"Could you let me know when would be a better time to call you back? "
-            f"You can say something like — in 30 minutes, today at 5 PM, or tomorrow morning."
+            f"Of course, completely understandable! "
+            f"Could you let me know a time that works better for you? "
+            f"Something like — in 30 minutes, today at 5 PM, or tomorrow morning would be perfect."
             f"</Say>"
             f"</Gather>"
             f"<Redirect method='POST'>{base_url}/twilio/callback-time/{interview_id}</Redirect>"
@@ -541,50 +594,56 @@ async def twilio_callback_time(
 
     data["callback_time_raw"] = raw_time
     dt_str = _parse_callback_time(raw_time) if raw_time else None
-    data["callback_scheduled_at"] = dt_str
-    data["status"] = "callback_scheduled"
-
     call_log = data.get("call_log", [])
-    if call_log:
-        call_log[-1]["status"]   = "callback_scheduled"
-        call_log[-1]["ended_at"] = datetime.now().isoformat()
-        if dt_str:
-            call_log[-1]["callback_scheduled_at"] = dt_str
-
-    if dt_str and _SCHEDULER_OK:
-        try:
-            dt = datetime.fromisoformat(dt_str)
-            _scheduler.add_job(
-                _trigger_callback_call, 'date',
-                run_date=dt,
-                args=[interview_id],
-                id=f"callback_{interview_id}",
-                replace_existing=True,
-                misfire_grace_time=3600,
-            )
-            print(f"[Callback] Scheduled {interview_id} at {dt_str}")
-        except Exception as e:
-            print(f"[Callback] Schedule failed: {e}")
-
-    _save_interview(interview_id, data)
 
     if dt_str:
+        data["callback_scheduled_at"] = dt_str
+        data["status"] = "callback_scheduled"
+        if call_log:
+            call_log[-1]["status"]               = "callback_scheduled"
+            call_log[-1]["ended_at"]             = datetime.now().isoformat()
+            call_log[-1]["callback_scheduled_at"] = dt_str
+        if _SCHEDULER_OK:
+            try:
+                dt = datetime.fromisoformat(dt_str)
+                _scheduler.add_job(
+                    _trigger_callback_call, 'date',
+                    run_date=dt, args=[interview_id],
+                    id=f"callback_{interview_id}", replace_existing=True,
+                    misfire_grace_time=3600,
+                )
+                print(f"[Callback] Scheduled {interview_id} at {dt_str}")
+            except Exception as e:
+                print(f"[Callback] Schedule failed: {e}")
+        _save_interview(interview_id, data)
         try:
             readable = datetime.fromisoformat(dt_str).strftime("%A at %I:%M %p")
         except Exception:
             readable = "the time you mentioned"
+        return _xml(
+            f"<Response>"
+            f"<Say voice='Google.en-IN-Neural2-A'>"
+            f"Perfect! We'll give you a call back on {html.escape(readable)}. "
+            f"Thanks so much for your time today — have a wonderful day!"
+            f"</Say>"
+            f"<Hangup/>"
+            f"</Response>"
+        )
     else:
-        readable = "the time you mentioned"
-
-    return _xml(
-        f"<Response>"
-        f"<Say voice='Google.en-IN-Neural2-A'>"
-        f"Perfect, we will call you back on {html.escape(readable)}. "
-        f"Thank you for your time, have a great day!"
-        f"</Say>"
-        f"<Hangup/>"
-        f"</Response>"
-    )
+        data["status"]      = "declined"
+        data["fail_reason"] = "Candidate declined to schedule a callback"
+        if call_log:
+            call_log[-1]["status"]   = "declined"
+            call_log[-1]["ended_at"] = datetime.now().isoformat()
+        _save_interview(interview_id, data)
+        return _xml(
+            f"<Response>"
+            f"<Say voice='Google.en-IN-Neural2-A'>"
+            f"No problem at all — we appreciate your time. If you change your mind, feel free to reach out to us. Have a wonderful day!"
+            f"</Say>"
+            f"<Hangup/>"
+            f"</Response>"
+        )
 
 
 @router.api_route("/twilio/answer/{interview_id}/{q_idx}", methods=["GET", "POST"])
@@ -625,7 +684,7 @@ async def twilio_answer(
                     return _xml(
                         f"<Response>"
                         f"<Say voice='Google.en-IN-Neural2-A'>"
-                        f"I didn't hear anything. Please answer after the beep, then press hash."
+                        f"Hmm, I didn't catch anything there. Please go ahead and answer after the beep, then press the # key when you're done."
                         f"</Say>"
                         f"<Record"
                         f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
@@ -644,9 +703,9 @@ async def twilio_answer(
                 try:
                     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TE
                     with ThreadPoolExecutor(max_workers=1) as _pool:
-                        _fut = _pool.submit(transcribe_recording, RecordingUrl + ".mp3", fast=True)
+                        _fut = _pool.submit(transcribe_recording, RecordingUrl + ".mp3", fast=False)
                         try:
-                            quick_text = _fut.result(timeout=10)
+                            quick_text = _fut.result(timeout=20)
                             print(f"[Twilio answer] q={q_idx} transcript: {quick_text[:100]!r}")
                         except _TE:
                             print(f"[Twilio answer] q={q_idx} transcription timed out")
@@ -654,6 +713,10 @@ async def twilio_answer(
                     print(f"[Twilio answer] inline transcription failed: {te}")
 
                 is_repeat = bool(quick_text) and any(kw in quick_text.lower() for kw in REPEAT_KEYWORDS)
+
+                # Claude fallback: catches Whisper hallucinations on short responses
+                if not is_repeat and quick_text and len(quick_text.split()) < 20:
+                    is_repeat = _is_repeat_request(quick_text)
 
                 if is_repeat:
                     repeat_count = data["repeat_counts"].get(q_idx, 0)
@@ -665,8 +728,7 @@ async def twilio_answer(
                         return _xml(
                             f"<Response>"
                             f"<Say voice='Google.en-IN-Neural2-A'>"
-                            f"Of course! <break time='400ms'/>"
-                            f"Question {q_idx+1} of {total}. <break time='300ms'/>{safe_q}"
+                            f"Of course, happy to repeat that! <break time='400ms'/>{safe_q}"
                             f"</Say>"
                             f"<Record"
                             f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
@@ -685,7 +747,7 @@ async def twilio_answer(
                     return _xml(
                         f"<Response>"
                         f"<Say voice='Google.en-IN-Neural2-A'>"
-                        f"Please press hash to complete your answer."
+                        f"Whenever you're ready, just press the # key to wrap up your answer."
                         f"</Say>"
                         f"<Record"
                         f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
@@ -708,10 +770,12 @@ async def twilio_answer(
         if next_q < total:
             print(f"[Twilio answer] advancing to q={next_q}")
             safe_next_q = html.escape(questions[next_q])
+            transition  = _TRANSITIONS[next_q % len(_TRANSITIONS)]
+            midpoint    = " We're halfway through — you're doing brilliantly! <break time='300ms'/>" if next_q == total // 2 else ""
             return _xml(
                 f"<Response>"
                 f"<Say voice='Google.en-IN-Neural2-A'>"
-                f"Question {next_q+1} of {total}. <break time='300ms'/>{safe_next_q}"
+                f"{transition}{midpoint} <break time='400ms'/>{safe_next_q}"
                 f"</Say>"
                 f"<Record"
                 f"  action='{base_url}/twilio/answer/{interview_id}/{next_q}'"
@@ -727,9 +791,9 @@ async def twilio_answer(
             return _xml(
                 "<Response>"
                 "<Say voice='Google.en-IN-Neural2-A'>"
-                "Thank you so much for your time. "
-                "We will review your responses and get back to you soon. "
-                "Have a wonderful day. Goodbye!"
+                "That's all my questions for today — you did a wonderful job! "
+                "It was genuinely lovely speaking with you. "
+                "Our team will be in touch very soon. Wishing you a brilliant rest of your day — take care!"
                 "</Say>"
                 "<Hangup/>"
                 "</Response>"
@@ -741,7 +805,7 @@ async def twilio_answer(
         return _xml(
             "<Response>"
             "<Say voice='Google.en-IN-Neural2-A'>"
-            "We encountered a technical issue. Thank you for your time. Goodbye!"
+            "Oh, I'm so sorry — we seem to have hit a small technical hiccup. Thank you so much for your time today, and we'll be in touch soon. Take care!"
             "</Say>"
             "<Hangup/>"
             "</Response>"
@@ -772,7 +836,7 @@ async def twilio_status_callback(interview_id: str, request: Request, background
         data["fail_reason"] = "Call not answered" if call_status == "no-answer" else "Candidate's line was busy"
         if call_log:
             call_log[-1].update({"status": "failed", "ended_at": now_iso, "fail_reason": data["fail_reason"]})
-    elif len(recordings) == 0 and call_status != "completed":
+    elif len(recordings) == 0:
         data["status"]      = "abandoned"
         data["fail_reason"] = "Candidate disconnected before answering any question"
         if call_log:

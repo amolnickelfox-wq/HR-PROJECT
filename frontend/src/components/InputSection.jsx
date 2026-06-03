@@ -120,6 +120,7 @@ export default function InputSection({
   }, [handleSubmit])
 
   const handleClear = () => {
+    if (!window.confirm('Are you sure you want to clear the job description and resume?')) return
     setResume(''); setJd(defaultJd || ''); setFileName(''); setUploadErr('')
     if (isBatch) onBatchFilesChange([])
     onClear?.()
@@ -132,7 +133,11 @@ export default function InputSection({
     form.append('file', file)
     try {
       const res = await fetch('/upload-resume', { method: 'POST', body: form })
-      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Upload failed') }
+      if (!res.ok) {
+        let detail = 'Upload failed'
+        try { const err = await res.json(); detail = err.detail || detail } catch {}
+        throw new Error(detail)
+      }
       const data = await res.json()
       setResume(data.resume_text)
     } catch (e) {

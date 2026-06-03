@@ -100,6 +100,7 @@ function callDuration(start, end) {
 function CallLogBadge({ status, failReason, callbackScheduledAt, isCallback }) {
   let label, cls
   if (status === 'completed')  { label = '✓ Completed';     cls = 'verdict-high'   }
+  else if (status === 'declined') { label = '🚫 Declined'; cls = 'verdict-low' }
   else if (status === 'calling' || status === 'processing') {
     label = isCallback ? '📞 Callback In Progress' : '📞 In Progress'
     cls = 'verdict-medium'
@@ -127,7 +128,23 @@ function CallLogBadge({ status, failReason, callbackScheduledAt, isCallback }) {
 }
 
 export default function InterviewPanel({ interview }) {
-  const [showTranscript, setShowTranscript] = useState(false)
+  const [showTranscript,   setShowTranscript]   = useState(false)
+  const [resolving,        setResolving]         = useState(false)
+  const [resolveMsg,       setResolveMsg]        = useState('')
+
+  const handleForceResolve = async () => {
+    if (!window.confirm('Force resolve this stuck call? This will process any existing recordings or mark it as abandoned.')) return
+    setResolving(true)
+    try {
+      const res = await fetch(`/interview/force-resolve/${interview.interview_id}`, { method: 'POST' })
+      const data = await res.json()
+      setResolveMsg(data.message || 'Done.')
+    } catch {
+      setResolveMsg('Failed to resolve. Check backend.')
+    } finally {
+      setResolving(false)
+    }
+  }
 
   if (!interview) return null
 
@@ -180,6 +197,17 @@ export default function InterviewPanel({ interview }) {
         <div className="iv-status iv-status--calling">
           <span className="iv-pulse" />
           Call in progress — waiting for candidate to complete interview…
+          <div style={{ marginTop: 10 }}>
+            <button
+              className="btn-clear"
+              style={{ fontSize: '0.75rem', padding: '4px 12px' }}
+              onClick={handleForceResolve}
+              disabled={resolving}
+            >
+              {resolving ? 'Resolving…' : 'Force Resolve'}
+            </button>
+            {resolveMsg && <span style={{ marginLeft: 10, fontSize: '0.75rem', color: 'var(--text-3)' }}>{resolveMsg}</span>}
+          </div>
         </div>
       )}
 
@@ -189,6 +217,12 @@ export default function InterviewPanel({ interview }) {
           {interview.processing_step
             ? `${interview.processing_step}…`
             : 'Processing interview — transcribing and scoring…'}
+        </div>
+      )}
+
+      {status === 'declined' && (
+        <div className="iv-status iv-status--failed">
+          🚫 Candidate refused the interview and declined to schedule a callback.
         </div>
       )}
 

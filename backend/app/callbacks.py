@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backend.app.state import interview_store, _scheduler, _SCHEDULER_OK
 from backend.app.database import _save_interview
@@ -59,7 +59,8 @@ def _reschedule_pending_callbacks():
             run_at = datetime.fromisoformat(scheduled)
         except Exception:
             continue
-        if run_at <= datetime.now():
+        now = datetime.now(timezone.utc) if run_at.tzinfo else datetime.now()
+        if run_at <= now:
             threading.Thread(target=_trigger_callback_call, args=(iid,), daemon=True).start()
         else:
             _scheduler.add_job(

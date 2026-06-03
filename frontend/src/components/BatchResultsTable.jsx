@@ -48,6 +48,9 @@ function StatusBadge({ c }) {
   if (iid === 'abandoned') {
     return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>📵 Call Dropped</span>
   }
+  if (iid === 'declined') {
+    return <span className="score-verdict verdict-low" style={{ fontSize: '0.7rem' }}>🚫 Declined</span>
+  }
   if (iid === 'failed') {
     const r = (c.fail_reason || '').toLowerCase()
     if (r.includes('not answered'))
