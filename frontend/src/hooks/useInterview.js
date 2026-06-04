@@ -18,7 +18,7 @@ export function useInterview() {
         const data = JSON.parse(event.data)
         if (data.status === 'not_found') { es.close(); esRef.current = null; return }
         setInterview(data)
-        if (['completed', 'abandoned', 'failed', 'callback_scheduled'].includes(data.status)) {
+        if (['completed', 'abandoned', 'failed', 'callback_scheduled', 'declined'].includes(data.status)) {
           es.close()
           esRef.current = null
         }

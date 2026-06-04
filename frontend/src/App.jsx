@@ -49,10 +49,11 @@ export default function App() {
 
   // ── analyze hook ──
   const {
-    result, setResult, loading, error,
+    result, setResult, singleId, loading, error,
     resumeText, jdText,
     handleAnalyze, clearAnalyze,
   } = useAnalyze({
+    openingId: activeOpeningId,
     onAutoSaveJd: (jText) => {
       if (activeOpeningId && jText.trim()) {
         const op = openings.find(o => o.id === activeOpeningId)
@@ -100,10 +101,10 @@ export default function App() {
   useEffect(() => {
     if (result && result !== prevResultRef.current) {
       const score    = parseInt(result.match_score) || 0
-      const delta    = { total: 1, qualified: score >= 75 ? 1 : 0 }
-      const singleId = Date.now().toString()
+      const delta    = { total: 1, qualified: score >= 70 ? 1 : 0 }
+      const sid      = singleId || Date.now().toString()
       const entry    = {
-        _singleId:        singleId,
+        _singleId:        sid,
         _batchId:         null,
         _type:            'single',
         name:             result.name   || null,
@@ -111,7 +112,7 @@ export default function App() {
         phone:            result.phone  || null,
         file_name:        result.name   || 'Single Candidate',
         resume_score:     score,
-        filter_status:    score >= 75 ? 'qualified' : 'filtered_out',
+        filter_status:    score >= 70 ? 'qualified' : 'filtered_out',
         interview_status: 'pending',
         interview_score:  null,
         combined_score:   null,
@@ -128,7 +129,7 @@ export default function App() {
           setDuplicateModal({
             existing,
             onAddAnyway: () => {
-              currentSingleIdRef.current = singleId
+              currentSingleIdRef.current = sid
               addSingleToOpening(activeOpeningId, entry, delta)
               addAllTime(delta)
               setDuplicateModal(null)
@@ -136,7 +137,7 @@ export default function App() {
             onCancel: () => setDuplicateModal(null),
           })
         } else {
-          currentSingleIdRef.current = singleId
+          currentSingleIdRef.current = sid
           addSingleToOpening(activeOpeningId, entry, delta)
           addAllTime(delta)
         }
@@ -204,6 +205,7 @@ export default function App() {
       candidate_name: result.name,
       job_title:      openings.find(o => o.id === activeOpeningId)?.title || '',
       opening_id:     activeOpeningId || null,
+      single_id:      currentSingleIdRef.current || null,
     })
   }
 

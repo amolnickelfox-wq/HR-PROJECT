@@ -19,7 +19,11 @@ from backend.services.interviewer import (
 )
 from backend.utils.file_utils import extract_job_title
 from backend.app.state import interview_store, batch_store, DEFAULT_QUESTIONS, _scheduler, _SCHEDULER_OK
-from backend.app.database import _save_interview, _save_transcript_entries
+from backend.app.database import (
+    _save_interview, _save_transcript_entries,
+    _sync_candidate_interview, _link_single_candidate_interview,
+    _load_interview,
+)
 from backend.app.callbacks import _trigger_callback_call
 
 router = APIRouter()
@@ -64,6 +68,17 @@ def _is_repeat_request(text: str) -> bool:
         return False
 
 
+def _get_interview(interview_id: str) -> dict | None:
+    data = interview_store.get(interview_id)
+    if data:
+        return data
+    data = _load_interview(interview_id)
+    if data:
+        interview_store[interview_id] = data
+        print(f"[Recovery] Reloaded interview {interview_id} from DB")
+    return data
+
+
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
 class InterviewRequest(BaseModel):
     phone: str
@@ -72,6 +87,7 @@ class InterviewRequest(BaseModel):
     candidate_name: str | None = None
     job_title: str | None = None
     opening_id: str | None = None
+    single_id: str | None = None
 
 
 class SimulateRequest(BaseModel):
@@ -143,8 +159,8 @@ def _detect_consent(text: str) -> bool:
         except Exception as e:
             print(f"[Consent] Claude sentiment failed: {e}")
 
-    print(f"[Consent] fallback has_no={has_no} text='{text}'")
-    return not has_no
+    print(f"[Consent] fallback has_no={has_no} has_yes={has_yes} text='{text}'")
+    return has_yes and not has_no
 
 
 def _parse_callback_time(raw: str) -> str | None:
@@ -153,7 +169,9 @@ def _parse_callback_time(raw: str) -> str | None:
         return None
     try:
         client = _anthropic.Anthropic(api_key=claude_key)
-        now = datetime.now()
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(IST)
         prompt = (
             f"The candidate said: \"{raw}\"\n"
             f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p')} IST.\n\n"
@@ -163,6 +181,7 @@ def _parse_callback_time(raw: str) -> str | None:
             "- Today: 'today at 5pm' → today 17:00, 'tonight at 8' → today 20:00\n"
             "- Named day: 'tomorrow at 3pm' → tomorrow 15:00, 'Friday at 2pm' → next Friday 14:00\n"
             "- Vague: 'morning' → next day 10:00, 'afternoon' → next day 14:00, 'evening' → next day 18:00\n"
+            "- Ambiguous hour (e.g. 'at 1', 'at 2', 'at 3' with no AM/PM): assume PM (13:00, 14:00, 15:00) during business hours (9am–8pm range). Only use AM if the candidate explicitly says AM or mentions midnight/early morning.\n"
             "Return ONLY the ISO 8601 string. If you truly cannot interpret it, return the word null."
         )
         resp = client.messages.create(
@@ -259,8 +278,12 @@ def _process_interview(interview_id: str):
         "score_result": score_result,
         "call_log":     call_log,
     }
-    _save_interview(interview_id, interview_store[interview_id])
-    _save_transcript_entries(interview_id, interview_store[interview_id])
+    try:
+        _save_interview(interview_id, interview_store[interview_id])
+        _save_transcript_entries(interview_id, interview_store[interview_id])
+        _sync_candidate_interview(interview_id, interview_store[interview_id])
+    except Exception as e:
+        print(f"[Process] Final save failed for {interview_id}: {e}")
 
 
 class _QuestionsRequest(BaseModel):
@@ -349,6 +372,8 @@ async def start_interview(req: InterviewRequest):
         raise HTTPException(500, f"Failed to initiate call: {e}")
 
     _save_interview(interview_id, interview_store[interview_id])
+    if req.single_id:
+        _link_single_candidate_interview(req.single_id, interview_id)
     return {"interview_id": interview_id, "call_id": interview_id, "status": "calling", "questions": questions}
 
 
@@ -399,6 +424,7 @@ async def recall_interview(interview_id: str):
         "fail_reason":           None,
         "callback_time_raw":     None,
         "callback_scheduled_at": None,
+        "_processing_started":   False,
         "call_log":              existing_log + [{"attempt": len(existing_log) + 1, "started_at": datetime.now().isoformat(), "status": "calling"}],
     })
 
@@ -455,7 +481,7 @@ async def callbacks_due():
 # ─── Twilio TwiML Routes ──────────────────────────────────────────────────────
 @router.api_route("/twilio/start/{interview_id}", methods=["GET", "POST"])
 async def twilio_start(interview_id: str):
-    data = interview_store.get(interview_id)
+    data = _get_interview(interview_id)
     if not data:
         return _hangup_xml()
 
@@ -492,7 +518,7 @@ async def twilio_consent(
     SpeechResult: str = Form(default=None),
     RecordingUrl: str = Form(default=None),
 ):
-    data = interview_store.get(interview_id)
+    data = _get_interview(interview_id)
     if not data:
         return _hangup_xml()
 
@@ -516,6 +542,7 @@ async def twilio_consent(
     if not transcript.strip():
         if not data.get("consent_re_asked"):
             data["consent_re_asked"] = True
+            _save_interview(interview_id, data)
             return _xml(
                 f"<Response>"
                 f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
@@ -578,7 +605,7 @@ async def twilio_callback_time(
     SpeechResult: str = Form(default=None),
     RecordingUrl: str = Form(default=None),
 ):
-    data = interview_store.get(interview_id)
+    data = _get_interview(interview_id)
     if not data:
         return _hangup_xml()
 
@@ -658,7 +685,7 @@ async def twilio_answer(
     Digits:            str = Form(default=None),
 ):
     try:
-        data = interview_store.get(interview_id)
+        data = _get_interview(interview_id)
         if not data:
             return _hangup_xml()
 
@@ -672,11 +699,15 @@ async def twilio_answer(
 
         print(f"[Twilio answer] interview={interview_id} q={q_idx}/{total-1} duration={duration}s digits={Digits!r}")
 
+        if q_idx >= total:
+            print(f"[Twilio answer] q_idx={q_idx} out of bounds (total={total}) — hanging up")
+            return _hangup_xml()
+
         if RecordingUrl and not data["transcriptions"].get(q_idx):
             data["status"] = "processing"
 
-            # Truly silent — no speech at all
-            if duration < 1 and not Digits:
+            # Truly silent or near-silent (Whisper hallucinates on < 3s clips)
+            if duration < 3 and not Digits:
                 retries = data["repeat_counts"].get(q_idx, 0) + 1
                 data["repeat_counts"][q_idx] = retries
                 if retries < 3:
@@ -742,7 +773,8 @@ async def twilio_answer(
                         is_repeat = False
 
                 # Spoke but didn't press # and transcription isn't a repeat
-                if duration > 6 and not Digits:
+                # Skip if maxLength (120s) was hit — treat as completed answer
+                if duration > 6 and not Digits and duration < 118:
                     print(f"[Twilio answer] spoke then paused q={q_idx} — prompting press #")
                     return _xml(
                         f"<Response>"
@@ -818,7 +850,7 @@ async def twilio_status_callback(interview_id: str, request: Request, background
     call_status = form.get("CallStatus", "")
     print(f"[Twilio status] interview={interview_id} CallStatus={call_status}")
 
-    data = interview_store.get(interview_id)
+    data = _get_interview(interview_id)
     if not data:
         return {"status": "ok"}
 
@@ -848,4 +880,5 @@ async def twilio_status_callback(interview_id: str, request: Request, background
         background_tasks.add_task(_process_interview, interview_id)
 
     _save_interview(interview_id, data)
+    _sync_candidate_interview(interview_id, data)
     return {"status": "ok"}

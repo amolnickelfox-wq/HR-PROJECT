@@ -47,7 +47,7 @@ export default function BatchProgress({ batchData }) {
                 {c.resume_score != null && (
                   <div style={{ fontSize: '0.74rem', color: 'var(--text-3)' }}>
                     Resume:{' '}
-                    <span style={{ color: c.resume_score >= 75 ? 'var(--green)' : 'var(--yellow)' }}>
+                    <span style={{ color: c.resume_score >= 70 ? 'var(--green)' : 'var(--yellow)' }}>
                       {c.resume_score} / 100
                     </span>
                     {c.filter_status === 'filtered_out' && (

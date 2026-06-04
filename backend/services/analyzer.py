@@ -198,7 +198,7 @@ def score_experience(exp_str, jd_text):
         return 25
     if candidate >= lo - 1:
         return 18
-    return 8
+    return 12
 
 
 def score_projects(resume_text, jd_text):
@@ -211,7 +211,7 @@ def score_projects(resume_text, jd_text):
     if not jd_kw:
         return 14
     hits = sum(1 for k in jd_kw if k in rl)
-    return round((hits / len(jd_kw)) * 20)
+    return max(8, round((hits / len(jd_kw)) * 20))
 
 
 def score_education(resume_text):
@@ -221,7 +221,7 @@ def score_education(resume_text):
                                   'electronics','mathematics','statistics']):
             return 10
         return 7
-    return 3
+    return 5
 
 
 def get_experience_fit(candidate_exp, jd_text):

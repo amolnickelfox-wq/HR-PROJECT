@@ -19,6 +19,7 @@ export default function BatchCandidateModal({ candidate, onClose, onCallCandidat
 
   const data = candidate.analyze_result
   const interview = {
+    interview_id: candidate.interview_id,
     status:       candidate.interview_status,
     questions:    candidate.questions || [],
     score_result: candidate.score_result,

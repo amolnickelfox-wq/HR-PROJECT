@@ -28,6 +28,7 @@ def _trigger_callback_call(interview_id: str):
         "transcript":            None,
         "score_result":          None,
         "fail_reason":           None,
+        "_processing_started":   False,
         "call_log":              existing_log + [{
             "attempt":    len(existing_log) + 1,
             "started_at": datetime.now().isoformat(),

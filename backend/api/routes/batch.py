@@ -140,7 +140,7 @@ def _process_batch(batch_id: str):
                 "email":          result.get("email"),
                 "phone":          result.get("phone"),
                 "resume_score":   score_num,
-                "filter_status":  "qualified" if score_num >= 75 else "filtered_out",
+                "filter_status":  "qualified" if score_num >= 70 else "filtered_out",
             })
         except Exception as e:
             print(f"[Batch] analyze failed for {cand['file_name']}: {e}")

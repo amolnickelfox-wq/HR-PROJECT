@@ -2,11 +2,11 @@ export const safeJson = async (res) => {
   try { return await res.json() } catch { return {} }
 }
 
-export const apiAnalyze = (resumeText, jdText, signal) =>
+export const apiAnalyze = (resumeText, jdText, signal, openingId, singleId) =>
   fetch('/analyze', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ resume_text: resumeText, jd_text: jdText }),
+    body:    JSON.stringify({ resume_text: resumeText, jd_text: jdText, opening_id: openingId || null, single_id: singleId || null }),
     signal,
   })
 

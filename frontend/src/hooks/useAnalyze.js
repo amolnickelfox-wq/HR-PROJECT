@@ -1,8 +1,9 @@
 import { useState, useRef } from 'react'
 import { apiAnalyze, safeJson } from '../api/client'
 
-export function useAnalyze({ onAutoSaveJd } = {}) {
+export function useAnalyze({ onAutoSaveJd, openingId } = {}) {
   const [result,     setResult]     = useState(null)
+  const [singleId,   setSingleId]   = useState(null)
   const [loading,    setLoading]    = useState(false)
   const [error,      setError]      = useState('')
   const [resumeText, setResumeText] = useState('')
@@ -14,6 +15,8 @@ export function useAnalyze({ onAutoSaveJd } = {}) {
     const ctrl = new AbortController()
     abortRef.current = ctrl
     const timer = setTimeout(() => ctrl.abort(), 90000)
+    const sid = Date.now().toString()
+    setSingleId(sid)
     setLoading(true)
     setError('')
     setResult(null)
@@ -21,7 +24,7 @@ export function useAnalyze({ onAutoSaveJd } = {}) {
     setJdText(jText)
     onAutoSaveJd?.(jText)
     try {
-      const res = await apiAnalyze(rText, jText, ctrl.signal)
+      const res = await apiAnalyze(rText, jText, ctrl.signal, openingId, sid)
       if (!res.ok) {
         const err = await safeJson(res)
         throw new Error(err.detail || 'Analysis failed')
@@ -47,5 +50,5 @@ export function useAnalyze({ onAutoSaveJd } = {}) {
     setJdText('')
   }
 
-  return { result, setResult, loading, error, resumeText, jdText, handleAnalyze, clearAnalyze }
+  return { result, setResult, singleId, loading, error, resumeText, jdText, handleAnalyze, clearAnalyze }
 }

@@ -122,6 +122,12 @@ def _init_db():
             conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_bc_interview  ON batch_candidates(interview_id)"))
             conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_bc_filter     ON batch_candidates(filter_status)"))
             conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_bc_iv_status  ON batch_candidates(interview_status)"))
+            # Migrations for single-candidate support
+            conn.execute(_sql("ALTER TABLE batch_candidates ALTER COLUMN batch_id DROP NOT NULL"))
+            conn.execute(_sql("ALTER TABLE batch_candidates ADD COLUMN IF NOT EXISTS opening_id TEXT REFERENCES job_openings(id) ON DELETE SET NULL"))
+            conn.execute(_sql("ALTER TABLE batch_candidates ADD COLUMN IF NOT EXISTS single_id TEXT"))
+            conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_bc_opening    ON batch_candidates(opening_id)"))
+            conn.execute(_sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_bc_single ON batch_candidates(single_id) WHERE single_id IS NOT NULL"))
             conn.commit()
         print("[DB] PostgreSQL connected — 5 tables ready")
     except Exception as e:
@@ -273,6 +279,115 @@ def _save_transcript_entries(iid: str, data: dict):
         print(f"[DB] _save_transcript_entries failed for {iid}: {e}")
 
 
+def _sync_candidate_interview(interview_id: str, data: dict):
+    if not _db_engine:
+        return
+    status       = data.get("status", "pending")
+    score_result = data.get("score_result")
+    interview_score = None
+    combined_score  = None
+    if score_result:
+        try:
+            raw = score_result.get("interview_score", "0 / 100")
+            interview_score = int(str(raw).split("/")[0].strip())
+        except Exception:
+            pass
+    try:
+        with _db_engine.connect() as conn:
+            row = conn.execute(_sql(
+                "SELECT resume_score FROM batch_candidates WHERE interview_id = :iid LIMIT 1"
+            ), {"iid": interview_id}).mappings().first()
+            if row and row["resume_score"] is not None and interview_score is not None:
+                combined_score = round((row["resume_score"] * 0.4) + (interview_score * 0.6))
+            conn.execute(_sql("""
+                UPDATE batch_candidates SET
+                    interview_status      = :status,
+                    interview_score       = :iscore,
+                    combined_score        = :cscore,
+                    score_result          = CAST(:score_result AS jsonb),
+                    callback_scheduled_at = :cb_at,
+                    updated_at            = NOW()
+                WHERE interview_id = :iid
+            """), {
+                "iid":          interview_id,
+                "status":       status,
+                "iscore":       interview_score,
+                "cscore":       combined_score,
+                "score_result": json.dumps(score_result) if score_result else None,
+                "cb_at":        _cb_ts(data.get("callback_scheduled_at")),
+            })
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _sync_candidate_interview failed for {interview_id}: {e}")
+
+
+def _link_single_candidate_interview(single_id: str, interview_id: str):
+    if not _db_engine or not single_id:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                UPDATE batch_candidates SET
+                    interview_id     = :iid,
+                    interview_status = 'calling',
+                    updated_at       = NOW()
+                WHERE single_id = :sid
+            """), {"sid": single_id, "iid": interview_id})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _link_single_candidate_interview failed: {e}")
+
+
+def _save_single_candidate(single_id: str, opening_id: str | None, resume_text: str, result: dict):
+    if not _db_engine:
+        return
+    score_str = result.get("match_score", "0 / 100")
+    try:
+        score_num = int(str(score_str).split("/")[0].strip())
+    except Exception:
+        score_num = 0
+    filter_status = "qualified" if score_num >= 70 else "filtered_out"
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                INSERT INTO batch_candidates (
+                    batch_id, single_id, opening_id, file_name, name, email, phone,
+                    resume_score, filter_status, interview_status,
+                    resume_text, analyze_result, updated_at
+                ) VALUES (
+                    NULL, :single_id,
+                    (SELECT id FROM job_openings WHERE id = :opening_id),
+                    :file_name, :name, :email, :phone,
+                    :resume_score, :filter_status, 'pending',
+                    :resume_text, CAST(:analyze_result AS jsonb), NOW()
+                )
+                ON CONFLICT (single_id) DO UPDATE SET
+                    opening_id    = EXCLUDED.opening_id,
+                    name          = EXCLUDED.name,
+                    email         = EXCLUDED.email,
+                    phone         = EXCLUDED.phone,
+                    resume_score  = EXCLUDED.resume_score,
+                    filter_status = EXCLUDED.filter_status,
+                    resume_text   = EXCLUDED.resume_text,
+                    analyze_result= EXCLUDED.analyze_result,
+                    updated_at    = NOW()
+            """), {
+                "single_id":     single_id,
+                "opening_id":    opening_id,
+                "file_name":     result.get("name") or "Single Candidate",
+                "name":          result.get("name"),
+                "email":         result.get("email"),
+                "phone":         result.get("phone"),
+                "resume_score":  score_num,
+                "filter_status": filter_status,
+                "resume_text":   resume_text,
+                "analyze_result": json.dumps(result),
+            })
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _save_single_candidate failed for {single_id}: {e}")
+
+
 def _save_batch(bid: str, data: dict):
     if not _db_engine:
         return
@@ -346,6 +461,44 @@ def _save_batch(bid: str, data: dict):
             conn.commit()
     except Exception as e:
         print(f"[DB] _save_batch failed for {bid}: {e}")
+
+
+def _load_interview(interview_id: str) -> dict | None:
+    if not _db_engine:
+        return None
+    try:
+        with _db_engine.connect() as conn:
+            row = conn.execute(_sql("SELECT * FROM interviews WHERE id = :id"), {"id": interview_id}).mappings().first()
+            if not row:
+                return None
+            cb = row["callback_scheduled_at"]
+            return {
+                "interview_id":          row["id"],
+                "opening_id":            row["opening_id"],
+                "status":                row["status"],
+                "consent_status":        row["consent_status"],
+                "consent_raw":           row["consent_raw"],
+                "consent_re_asked":      row["consent_re_asked"],
+                "candidate_name":        row["candidate_name"],
+                "phone":                 row["phone"],
+                "job_title":             row["job_title"],
+                "jd_text":               row["jd_text"],
+                "twilio_call_sid":       row["twilio_call_sid"],
+                "transcript":            row["transcript"],
+                "fail_reason":           row["fail_reason"],
+                "processing_step":       row["processing_step"],
+                "callback_time_raw":     row["callback_time_raw"],
+                "callback_scheduled_at": cb.isoformat() if cb else None,
+                "questions":             row["questions"] or [],
+                "recordings":            {int(k): v for k, v in (row["recordings"] or {}).items()},
+                "transcriptions":        {int(k): v for k, v in (row["transcriptions"] or {}).items()},
+                "repeat_counts":         {int(k): v for k, v in (row["repeat_counts"] or {}).items()},
+                "score_result":          row["score_result"],
+                "call_log":              row["call_log"] or [],
+            }
+    except Exception as e:
+        print(f"[DB] _load_interview failed for {interview_id}: {e}")
+        return None
 
 
 def load_stores() -> tuple[dict, dict, dict]:
@@ -430,6 +583,35 @@ def load_stores() -> tuple[dict, dict, dict]:
                     "completed":  brow["completed"],
                     "candidates": candidates,
                 }
+            for crow in conn.execute(_sql("""
+                SELECT * FROM batch_candidates WHERE batch_id IS NULL ORDER BY created_at
+            """)).mappings():
+                oid = crow.get("opening_id")
+                if not oid or oid not in openings:
+                    continue
+                cb = crow.get("callback_scheduled_at")
+                openings[oid]["candidates"].append({
+                    "_singleId":         crow["single_id"] or str(crow["id"]),
+                    "_batchId":          None,
+                    "_type":             "single",
+                    "file_name":         crow["name"] or "Single Candidate",
+                    "name":              crow["name"],
+                    "email":             crow["email"],
+                    "phone":             crow["phone"],
+                    "resume_score":      crow["resume_score"],
+                    "analyze_result":    crow["analyze_result"],
+                    "filter_status":     crow["filter_status"],
+                    "interview_id":      crow["interview_id"],
+                    "interview_status":  crow["interview_status"],
+                    "interview_score":   crow["interview_score"],
+                    "combined_score":    crow["combined_score"],
+                    "callback_scheduled_at": cb.isoformat() if cb else None,
+                    "score_result":      crow["score_result"],
+                    "interview_status":  crow["interview_status"] or "pending",
+                    "score_result":      crow["score_result"],
+                    "transcript":        None,
+                    "questions":         [],
+                })
         print(f"[DB] Loaded {len(openings)} openings, {len(ivs)} interviews, {len(batches)} batches from PostgreSQL")
     except Exception as e:
         print(f"[DB] load_stores failed: {e}")

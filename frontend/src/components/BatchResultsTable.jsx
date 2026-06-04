@@ -3,7 +3,7 @@ import BatchCandidateModal from './BatchCandidateModal'
 
 function scoreColor(n) {
   if (n == null) return 'batch-score-none'
-  if (n >= 75)   return 'batch-score-high'
+  if (n >= 70)   return 'batch-score-high'
   if (n >= 60)   return 'batch-score-medium'
   return 'batch-score-low'
 }

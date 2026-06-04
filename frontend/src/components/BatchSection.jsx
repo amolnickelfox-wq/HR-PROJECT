@@ -76,7 +76,7 @@ export default function BatchSection() {
           Bulk Candidate <span className="hero-gradient">Processing</span>
         </h2>
         <p className="hero-sub">
-          Upload multiple resumes, auto-score against the JD, filter top candidates (≥ 75), run AI phone interviews, and get a ranked final report — fully automated.
+          Upload multiple resumes, auto-score against the JD, filter top candidates (≥ 70), run AI phone interviews, and get a ranked final report — fully automated.
         </p>
       </div>
 
@@ -128,7 +128,7 @@ export default function BatchSection() {
           {error && <div className="error-banner">⚠️ {error}</div>}
 
           <p className="hint">
-            Candidates scoring ≥ 75 will be auto-called for an AI phone interview
+            Candidates scoring ≥ 70 will be auto-called for an AI phone interview
           </p>
         </>
       )}

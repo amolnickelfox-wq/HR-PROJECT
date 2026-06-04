@@ -193,10 +193,12 @@ export default function InterviewPanel({ interview }) {
         </div>
       )}
 
-      {status === 'calling' && (
+      {(status === 'calling' || status === 'callback_scheduled') && (
         <div className="iv-status iv-status--calling">
           <span className="iv-pulse" />
-          Call in progress — waiting for candidate to complete interview…
+          {status === 'callback_scheduled'
+            ? 'Callback scheduled — if the call has already completed, use Force Resolve to process it.'
+            : 'Call in progress — waiting for candidate to complete interview…'}
           <div style={{ marginTop: 10 }}>
             <button
               className="btn-clear"
