@@ -128,8 +128,21 @@ def _init_db():
             conn.execute(_sql("ALTER TABLE batch_candidates ADD COLUMN IF NOT EXISTS single_id TEXT"))
             conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_bc_opening    ON batch_candidates(opening_id)"))
             conn.execute(_sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_bc_single ON batch_candidates(single_id) WHERE single_id IS NOT NULL"))
+            conn.execute(_sql("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id            SERIAL      PRIMARY KEY,
+                    username      TEXT        UNIQUE NOT NULL,
+                    password_hash TEXT        NOT NULL,
+                    role          TEXT        NOT NULL DEFAULT 'recruiter',
+                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+            # Migrations for name + temp password support
+            conn.execute(_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT"))
+            conn.execute(_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
+            conn.execute(_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS temp_expires_at TIMESTAMPTZ"))
             conn.commit()
-        print("[DB] PostgreSQL connected — 5 tables ready")
+        print("[DB] PostgreSQL connected — tables ready")
     except Exception as e:
         print(f"[DB] Connection failed: {e} — running without persistence")
         _db_engine = None
@@ -461,6 +474,136 @@ def _save_batch(bid: str, data: dict):
             conn.commit()
     except Exception as e:
         print(f"[DB] _save_batch failed for {bid}: {e}")
+
+
+import hashlib, secrets as _secrets
+
+def _hash_password(password: str) -> str:
+    salt = _secrets.token_hex(16)
+    h    = hashlib.sha256((salt + password).encode()).hexdigest()
+    return f"{salt}:{h}"
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        salt, h = stored.split(":", 1)
+        return hashlib.sha256((salt + password).encode()).hexdigest() == h
+    except Exception:
+        return False
+
+def _get_user(username: str) -> dict | None:
+    if not _db_engine:
+        return None
+    try:
+        with _db_engine.connect() as conn:
+            row = conn.execute(_sql("SELECT * FROM users WHERE username = :u"), {"u": username}).mappings().first()
+            if not row:
+                return None
+            return {
+                "id":                   row["id"],
+                "username":             row["username"],
+                "full_name":            row.get("full_name"),
+                "password_hash":        row["password_hash"],
+                "role":                 row["role"],
+                "must_change_password": row.get("must_change_password", False),
+                "temp_expires_at":      row["temp_expires_at"].isoformat() if row.get("temp_expires_at") else None,
+            }
+    except Exception as e:
+        print(f"[DB] _get_user failed: {e}")
+        return None
+
+def _create_user(username: str, password: str, role: str = "recruiter") -> bool:
+    if not _db_engine:
+        return False
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                INSERT INTO users (username, password_hash, role)
+                VALUES (:u, :ph, :r)
+                ON CONFLICT (username) DO NOTHING
+            """), {"u": username, "ph": _hash_password(password), "r": role})
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] _create_user failed: {e}")
+        return False
+
+def _list_users() -> list[dict]:
+    if not _db_engine:
+        return []
+    try:
+        with _db_engine.connect() as conn:
+            rows = conn.execute(_sql("SELECT id, username, full_name, role, must_change_password, created_at FROM users ORDER BY created_at")).mappings().all()
+            return [{"id": r["id"], "username": r["username"], "full_name": r.get("full_name"), "role": r["role"], "must_change_password": r.get("must_change_password", False)} for r in rows]
+    except Exception as e:
+        print(f"[DB] _list_users failed: {e}")
+        return []
+
+def _create_user_with_email(email: str, full_name: str, role: str) -> str | None:
+    if not _db_engine:
+        return None
+    from datetime import datetime, timedelta, timezone
+    from backend.services.email_service import generate_temp_password
+    temp_pass = generate_temp_password(full_name)
+    expires   = datetime.now(timezone.utc) + timedelta(hours=24)
+    try:
+        with _db_engine.connect() as conn:
+            result = conn.execute(_sql("""
+                INSERT INTO users (username, full_name, password_hash, role, must_change_password, temp_expires_at)
+                VALUES (:u, :name, :ph, :r, TRUE, :exp)
+                ON CONFLICT (username) DO NOTHING
+                RETURNING id
+            """), {"u": email, "name": full_name, "ph": _hash_password(temp_pass), "r": role, "exp": expires})
+            if not result.first():
+                return None  # username already exists
+            conn.commit()
+        return temp_pass
+    except Exception as e:
+        print(f"[DB] _create_user_with_email failed: {e}")
+        return None
+
+
+def _clear_temp_password(username: str):
+    if not _db_engine:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                UPDATE users SET must_change_password=FALSE, temp_expires_at=NULL WHERE username=:u
+            """), {"u": username})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _clear_temp_password failed: {e}")
+
+
+def _seed_super_admin(username: str, password: str):
+    if not _db_engine:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                INSERT INTO users (username, password_hash, role, full_name)
+                VALUES (:u, :ph, 'super_admin', 'Director')
+                ON CONFLICT (username) DO UPDATE SET
+                    password_hash = EXCLUDED.password_hash,
+                    role          = 'super_admin',
+                    full_name     = COALESCE(users.full_name, 'Director')
+            """), {"u": username, "ph": _hash_password(password)})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _seed_super_admin failed: {e}")
+
+
+def _delete_user(username: str) -> bool:
+    if not _db_engine:
+        return False
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("DELETE FROM users WHERE username = :u"), {"u": username})
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] _delete_user failed: {e}")
+        return False
 
 
 def _load_interview(interview_id: str) -> dict | None:

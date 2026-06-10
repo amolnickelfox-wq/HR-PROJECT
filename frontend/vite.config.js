@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     port: 3001,
     proxy: {
+      '/auth':         'http://localhost:8000',
       '/analyze':      'http://localhost:8000',
       '/parse':        'http://localhost:8000',
       '/health':       'http://localhost:8000',
@@ -13,6 +14,7 @@ export default defineConfig({
       '/upload-resume':'http://localhost:8000',
       '/batch':        'http://localhost:8000',
       '/twilio':       'http://localhost:8000',
+      '/openings':     'http://localhost:8000',
     },
   },
 })

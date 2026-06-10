@@ -1,26 +1,87 @@
 import { useState, useRef, useEffect } from 'react'
+import {
+  Briefcase, ChartBar, CheckCircle, Microphone,
+  Trophy, PencilSimple, X, Plus, WarningCircle,
+  Users, ArrowRight, UserPlus, Stack,
+} from '@phosphor-icons/react'
 import Sidebar           from './components/Sidebar'
 import InputSection      from './components/InputSection'
 import ResultsDashboard  from './components/ResultsDashboard'
 import BatchProgress     from './components/BatchProgress'
 import BatchResultsTable    from './components/BatchResultsTable'
 import CallbackAlertModal  from './components/CallbackAlertModal'
+import LoginPage         from './components/LoginPage'
+import UserManagement   from './components/UserManagement'
 
 import { useAppContext }  from './context/AppContext'
 import { useAnalyze }    from './hooks/useAnalyze'
 import { useInterview }  from './hooks/useInterview'
 import { useBatch }      from './hooks/useBatch'
 
+function OpeningContextBar({ opening, openings, onLink, onUnlink, showEmpty = true }) {
+  if (opening) return (
+    <div className="opening-context-bar">
+      <span className="opening-context-label">📁 {opening.title}</span>
+      <button className="opening-context-clear" onClick={onUnlink} title="Unlink opening">✕</button>
+    </div>
+  )
+  if (showEmpty && openings.length > 0) return (
+    <div className="opening-context-bar opening-context-bar--empty">
+      <span style={{ color: 'var(--text-3)', fontSize: '0.8rem' }}>No opening selected — </span>
+      <select className="opening-context-select" value="" onChange={e => onLink(e.target.value)}>
+        <option value="" disabled>select a job opening to pre-fill JD</option>
+        {openings.map(o => <option key={o.id} value={o.id}>{o.title}</option>)}
+      </select>
+    </div>
+  )
+  return null
+}
+
 const PAGE_TITLES = {
-  dashboard:      'Dashboard',
-  single:         'Single Candidate',
-  batch:          'Batch Pipeline',
-  'active-calls': 'Active Calls',
-  callbacks:      'Scheduled Callbacks',
-  rankings:       'Rankings',
+  dashboard:         'Job Openings',
+  single:            'Single Candidate',
+  batch:             'Batch Pipeline',
+  'active-calls':    'Active Calls',
+  callbacks:         'Scheduled Callbacks',
+  rankings:          'Rankings',
+  'change-password': 'Change Password',
+  'add-user':        'Add User',
+  'user-list':       'User List',
 }
 
 export default function App() {
+  const [authUser, setAuthUser] = useState(() => {
+    try {
+      const token = sessionStorage.getItem('auth_token')
+      const user  = sessionStorage.getItem('auth_user')
+      if (token && user) return JSON.parse(user)
+    } catch {}
+    return null
+  })
+
+  // Validate token with backend on load
+  useEffect(() => {
+    const token = sessionStorage.getItem('auth_token')
+    if (!token) { setAuthUser(null); return }
+    fetch('/auth/me', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(u => {
+        setAuthUser(u)
+        if (u.must_change_password) setActivePage('change-password')
+      })
+      .catch(() => { sessionStorage.removeItem('auth_token'); sessionStorage.removeItem('auth_user'); setAuthUser(null) })
+  }, [])
+
+  const [showUserMgmt, setShowUserMgmt] = useState(false)
+
+  const handleLogout = async () => {
+    const token = sessionStorage.getItem('auth_token')
+    if (token) await fetch('/auth/logout', { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } }).catch(() => {})
+    sessionStorage.removeItem('auth_token')
+    sessionStorage.removeItem('auth_user')
+    setAuthUser(null)
+  }
+
   const {
     allTime, addAllTime,
     openings, setOpenings, saveOpenings,
@@ -41,6 +102,7 @@ export default function App() {
 
   // ── navigation ──
   const [activePage, setActivePage] = useState('dashboard')
+  const [addCandidatesOpeningId, setAddCandidatesOpeningId] = useState(null)
 
   const resultsRef       = useRef(null)
   const currentSingleIdRef = useRef(null)
@@ -168,7 +230,7 @@ export default function App() {
       const bTotal     = batchData.total || 0
       const bQualified = batchData.candidates?.filter(c => c.filter_status === 'qualified').length || 0
       const bDone      = batchData.candidates?.filter(c =>
-        ['completed','abandoned','failed','callback_scheduled'].includes(c.interview_status)
+        c.interview_status === 'completed'
       ).length || 0
       addAllTime({ total: bTotal, qualified: bQualified, done: bDone, batchId })
       if (activeOpeningId) {
@@ -222,6 +284,10 @@ export default function App() {
     return Date.now() - snoozedAt > 10 * 60 * 1000
   })
 
+  const canEdit = authUser?.role !== 'user'
+
+  if (!authUser) return <LoginPage onLogin={setAuthUser} />
+
   return (
     <div className="app-shell">
       <Sidebar
@@ -229,6 +295,7 @@ export default function App() {
         onNavigate={handleNavigate}
         batchData={batchData}
         batchId={batchId}
+        userRole={authUser?.role}
       />
 
       <div className="app-body">
@@ -236,6 +303,17 @@ export default function App() {
           <h1 className="topbar-title">{PAGE_TITLES[activePage]}</h1>
           <div className="topbar-actions">
             <span className="topbar-online-badge">● System Online</span>
+            <div className="topbar-user">
+              <span className="topbar-user-name">
+                {authUser.full_name || authUser.username.charAt(0).toUpperCase() + authUser.username.slice(1)}
+              </span>
+              <span className={`topbar-role-badge topbar-role-badge--${authUser.role}`}>
+                {authUser.role === 'super_admin' ? 'Director' : authUser.role === 'admin' ? 'Admin' : 'View Only'}
+              </span>
+            </div>
+            <button className="btn-clear topbar-signout" onClick={handleLogout}>
+              Sign out
+            </button>
           </div>
         </div>
 
@@ -245,89 +323,119 @@ export default function App() {
           {activePage === 'dashboard' && (
             <div>
               <div className="opening-grid">
-                {openings.map(op => (
-                  <div key={op.id} className="opening-card">
-                    <div className="opening-card-header">
-                      <span className="opening-card-title">{op.title}</span>
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        <button className="opening-card-delete"
-                          onClick={() => { setEditingOpeningId(op.id); setEditingJd(op.jd || '') }}
-                          title="Edit JD">✏️</button>
-                        <button className="opening-card-delete"
-                          onClick={() => { if (window.confirm(`Delete "${op.title}"? This cannot be undone.`)) deleteOpening(op.id) }}
-                          title="Delete opening">✕</button>
-                      </div>
-                    </div>
-
-                    {editingOpeningId === op.id ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        <textarea
-                          className="opening-form-jd"
-                          placeholder="Paste the job description here…"
-                          value={editingJd}
-                          onChange={e => setEditingJd(e.target.value)}
-                          autoFocus
-                        />
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <button className="btn-analyze" style={{ flex: 1, fontSize: '0.8rem', padding: '7px 0' }}
-                            onClick={() => updateOpeningJd(op.id, editingJd.trim())}>
-                            Save JD
-                          </button>
-                          <button className="btn-clear" style={{ flex: 1, fontSize: '0.8rem', padding: '7px 0' }}
-                            onClick={() => { setEditingOpeningId(null); setEditingJd('') }}>
-                            Cancel
-                          </button>
+                {openings.map(op => {
+                  const cands     = op.candidates || []
+                  const total     = cands.filter(c => !c._duplicate_of).length
+                  const qualified = cands.filter(c => !c._duplicate_of && c.filter_status === 'qualified').length
+                  const done      = cands.filter(c => !c._duplicate_of && c.interview_status === 'completed').length
+                  const hasResults = op.stats.total > 0
+                  return (
+                    <div key={op.id} className={`opening-card${hasResults ? ' opening-card--has-results' : ''}`}>
+                      <div className="opening-card-header">
+                        <div className="opening-card-title-row">
+                          <div className="opening-card-icon-wrap">
+                            <Briefcase size={18} weight="duotone" />
+                          </div>
+                          <span className="opening-card-title">{op.title}</span>
                         </div>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="opening-card-stats">
-                          {(() => {
-                            const cands = op.candidates || []
-                            const total     = cands.filter(c => !c._duplicate_of).length
-                            const qualified = cands.filter(c => !c._duplicate_of && c.filter_status === 'qualified').length
-                            const done      = cands.filter(c => !c._duplicate_of && ['completed','abandoned','failed','callback_scheduled','declined'].includes(c.interview_status)).length
-                            return [
-                              { v: total,     l: 'Analyzed'    },
-                              { v: qualified, l: 'Qualified'   },
-                              { v: done,      l: 'Interviewed' },
-                            ].map(s => (
-                              <div key={s.l} className="opening-stat">
-                                <div className="opening-stat-value">{s.v}</div>
-                                <div className="opening-stat-label">{s.l}</div>
-                              </div>
-                            ))
-                          })()}
-                        </div>
-                        {!op.jd && (
-                          <div style={{ fontSize: '0.72rem', color: '#f59e0b', marginBottom: 4 }}>
-                            ⚠️ No JD saved — click ✏️ to add one
+                        {canEdit && (
+                          <div className="opening-card-actions-top">
+                            <button className="opening-icon-btn opening-icon-btn--edit"
+                              onClick={() => { setEditingOpeningId(op.id); setEditingJd(op.jd || '') }}
+                              title="Edit JD">
+                              <PencilSimple size={14} weight="bold" />
+                            </button>
+                            <button className="opening-icon-btn opening-icon-btn--delete"
+                              onClick={() => { if (window.confirm(`Delete "${op.title}"? This cannot be undone.`)) deleteOpening(op.id) }}
+                              title="Delete opening">
+                              <X size={14} weight="bold" />
+                            </button>
                           </div>
                         )}
-                        <div className="opening-card-actions">
-                          <button className="opening-btn opening-btn--single"
-                            onClick={() => { setActiveOpening(op.id); setResult(null); setInterview(null); handleNavigate('single') }}>
-                            👤 Single
-                          </button>
-                          <button className="opening-btn opening-btn--batch"
-                            onClick={() => { setActiveOpening(op.id); handleBatchReset(); handleNavigate('batch') }}>
-                            📂 Batch
-                          </button>
-                        </div>
-                        {op.stats.total > 0 && (
-                          <button className="opening-btn opening-btn--results"
-                            onClick={() => { setViewingOpeningId(op.id); handleNavigate('rankings') }}>
-                            🏆 View Results &amp; Rankings
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                ))}
+                      </div>
 
-                {!showOpeningForm && (
+                      {editingOpeningId === op.id ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <textarea
+                            className="opening-form-jd"
+                            placeholder="Paste the job description here…"
+                            value={editingJd}
+                            onChange={e => setEditingJd(e.target.value)}
+                            autoFocus
+                          />
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button className="btn-analyze" style={{ flex: 1, fontSize: '0.8rem', padding: '7px 0' }}
+                              onClick={() => updateOpeningJd(op.id, editingJd.trim())}>
+                              Save JD
+                            </button>
+                            <button className="btn-clear" style={{ flex: 1, fontSize: '0.8rem', padding: '7px 0' }}
+                              onClick={() => { setEditingOpeningId(null); setEditingJd('') }}>
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="opening-card-stats">
+                            <div className="opening-stat">
+                              <div className="opening-stat-icon opening-stat-icon--blue">
+                                <ChartBar size={16} weight="duotone" />
+                              </div>
+                              <div className="opening-stat-value">{total}</div>
+                              <div className="opening-stat-label">Analyzed</div>
+                            </div>
+                            <div className="opening-stat-divider" />
+                            <div className="opening-stat">
+                              <div className="opening-stat-icon opening-stat-icon--green">
+                                <CheckCircle size={16} weight="duotone" />
+                              </div>
+                              <div className="opening-stat-value opening-stat-value--green">{qualified}</div>
+                              <div className="opening-stat-label">Qualified</div>
+                            </div>
+                            <div className="opening-stat-divider" />
+                            <div className="opening-stat">
+                              <div className="opening-stat-icon opening-stat-icon--violet">
+                                <Microphone size={16} weight="duotone" />
+                              </div>
+                              <div className="opening-stat-value opening-stat-value--violet">{done}</div>
+                              <div className="opening-stat-label">Interviewed</div>
+                            </div>
+                          </div>
+
+                          {!op.jd && (
+                            <div className="opening-no-jd-warn">
+                              <WarningCircle size={13} weight="fill" />
+                              No JD saved — click edit to add one
+                            </div>
+                          )}
+
+                          <div className="opening-card-footer">
+                            {hasResults ? (
+                              <button className="opening-btn opening-btn--results"
+                                onClick={() => { setViewingOpeningId(op.id); handleNavigate('rankings') }}>
+                                <Trophy size={16} weight="duotone" />
+                                View Results &amp; Rankings
+                                <ArrowRight size={14} weight="bold" className="opening-btn-arrow" />
+                              </button>
+                            ) : (
+                              <button className="opening-btn opening-btn--add"
+                                onClick={() => setAddCandidatesOpeningId(op.id)}>
+                                <UserPlus size={15} weight="duotone" />
+                                Add Candidates
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )
+                })}
+
+                {canEdit && !showOpeningForm && (
                   <button className="opening-new-card" onClick={() => setShowOpeningForm(true)}>
-                    <div className="opening-new-icon">+</div>
+                    <div className="opening-new-icon-wrap">
+                      <Plus size={28} weight="light" />
+                    </div>
                     <div className="opening-new-label">New Job Opening</div>
                   </button>
                 )}
@@ -373,27 +481,66 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {addCandidatesOpeningId && (() => {
+                const targetOp = openings.find(o => o.id === addCandidatesOpeningId)
+                return (
+                  <div className="add-cand-overlay" onClick={() => setAddCandidatesOpeningId(null)}>
+                    <div className="add-cand-modal" onClick={e => e.stopPropagation()}>
+                      <div className="add-cand-header">
+                        <div className="add-cand-title">
+                          <Briefcase size={16} weight="duotone" />
+                          Add Candidates
+                        </div>
+                        <span className="add-cand-job">{targetOp?.title}</span>
+                        <button className="add-cand-close" onClick={() => setAddCandidatesOpeningId(null)}>
+                          <X size={16} weight="bold" />
+                        </button>
+                      </div>
+                      <div className="add-cand-body">
+                        <button className="add-cand-option" onClick={() => {
+                          setActiveOpening(addCandidatesOpeningId)
+                          setAddCandidatesOpeningId(null)
+                          handleNavigate('single')
+                        }}>
+                          <div className="add-cand-option-icon add-cand-option-icon--single">
+                            <UserPlus size={28} weight="duotone" />
+                          </div>
+                          <div className="add-cand-option-text">
+                            <div className="add-cand-option-title">Single Candidate</div>
+                            <div className="add-cand-option-desc">Upload one resume and get an instant AI analysis</div>
+                          </div>
+                          <ArrowRight size={16} weight="bold" className="add-cand-option-arrow" />
+                        </button>
+                        <button className="add-cand-option" onClick={() => {
+                          setActiveOpening(addCandidatesOpeningId)
+                          setAddCandidatesOpeningId(null)
+                          handleNavigate('batch')
+                        }}>
+                          <div className="add-cand-option-icon add-cand-option-icon--batch">
+                            <Stack size={28} weight="duotone" />
+                          </div>
+                          <div className="add-cand-option-text">
+                            <div className="add-cand-option-title">Batch Pipeline</div>
+                            <div className="add-cand-option-desc">Upload multiple resumes and run them in parallel</div>
+                          </div>
+                          <ArrowRight size={16} weight="bold" className="add-cand-option-arrow" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           )}
 
           {/* ── Single Candidate ── */}
           {activePage === 'single' && (
             <div>
-              {activeOpening && (
-                <div className="opening-context-bar">
-                  <span className="opening-context-label">📁 {activeOpening.title}</span>
-                  <button className="opening-context-clear" onClick={() => setActiveOpening(null)} title="Unlink opening">✕</button>
-                </div>
-              )}
-              {!activeOpening && openings.length > 0 && (
-                <div className="opening-context-bar opening-context-bar--empty">
-                  <span style={{ color: 'var(--text-3)', fontSize: '0.8rem' }}>No opening selected — </span>
-                  <select className="opening-context-select" value="" onChange={e => setActiveOpening(e.target.value)}>
-                    <option value="" disabled>select a job opening to pre-fill JD</option>
-                    {openings.map(o => <option key={o.id} value={o.id}>{o.title}</option>)}
-                  </select>
-                </div>
-              )}
+              <OpeningContextBar
+                opening={activeOpening} openings={openings}
+                onLink={setActiveOpening} onUnlink={() => setActiveOpening(null)}
+              />
               <InputSection
                 key={activeOpeningId || 'single-no-opening'}
                 mode="single"
@@ -402,6 +549,7 @@ export default function App() {
                 onClear={handleClearAll}
                 loading={loading}
                 error={error}
+                readOnly={!canEdit}
                 batchFiles={[]}
                 onBatchFilesChange={setBatchFiles}
                 onBatchStart={handleBatchStart}
@@ -415,7 +563,7 @@ export default function App() {
                     interview={interview}
                     callLoading={callLoading}
                     callError={callError}
-                    onStartInterview={handleStartInterviewWrapped}
+                    onStartInterview={canEdit ? handleStartInterviewWrapped : null}
                   />
                 )}
               </div>
@@ -425,21 +573,11 @@ export default function App() {
           {/* ── Batch Pipeline ── */}
           {activePage === 'batch' && (
             <div>
-              {activeOpening && (
-                <div className="opening-context-bar">
-                  <span className="opening-context-label">📁 {activeOpening.title}</span>
-                  <button className="opening-context-clear" onClick={() => setActiveOpening(null)} title="Unlink opening">✕</button>
-                </div>
-              )}
-              {!activeOpening && openings.length > 0 && !batchId && (
-                <div className="opening-context-bar opening-context-bar--empty">
-                  <span style={{ color: 'var(--text-3)', fontSize: '0.8rem' }}>No opening selected — </span>
-                  <select className="opening-context-select" value="" onChange={e => setActiveOpening(e.target.value)}>
-                    <option value="" disabled>select a job opening to pre-fill JD</option>
-                    {openings.map(o => <option key={o.id} value={o.id}>{o.title}</option>)}
-                  </select>
-                </div>
-              )}
+              <OpeningContextBar
+                opening={activeOpening} openings={openings}
+                onLink={setActiveOpening} onUnlink={() => setActiveOpening(null)}
+                showEmpty={!batchId}
+              />
               {!batchId && (
                 <InputSection
                   key={activeOpeningId || 'batch-no-opening'}
@@ -449,6 +587,7 @@ export default function App() {
                   onClear={handleClearAll}
                   loading={loading}
                   error={error}
+                  readOnly={!canEdit}
                   batchFiles={batchFiles}
                   onBatchFilesChange={setBatchFiles}
                   onBatchStart={handleBatchStart}
@@ -468,7 +607,8 @@ export default function App() {
                   <BatchResultsTable
                     candidates={batchData.candidates}
                     isComplete={batchData.status === 'completed'}
-                    onCallCandidate={handleCallCandidate}
+                    onCallCandidate={canEdit ? handleCallCandidate : null}
+                    canEdit={canEdit}
                   />
                   {batchData.status === 'completed' && (
                     <div className="btn-row" style={{ marginTop: 28 }}>
@@ -529,16 +669,29 @@ export default function App() {
                         {viewOpening.title}
                       </div>
                       <span className="char-count">{viewOpening.candidates.length} candidate{viewOpening.candidates.length !== 1 ? 's' : ''} · all runs</span>
-                      <button className="btn-clear" style={{ marginLeft: 'auto', padding: '4px 12px', fontSize: '0.8rem' }}
-                        onClick={() => { setViewingOpeningId(null) }}>
-                        Clear filter
-                      </button>
+                      <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
+                        {canEdit && <button className="btn-analyze"
+                          style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                          onClick={() => { setActiveOpening(viewOpening.id); setResult(null); setInterview(null); handleNavigate('single') }}>
+                          👤 Add Single
+                        </button>}
+                        {canEdit && <button className="btn-analyze"
+                          style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                          onClick={() => { setActiveOpening(viewOpening.id); handleBatchReset(); handleNavigate('batch') }}>
+                          📂 Add Batch
+                        </button>}
+                        <button className="btn-clear" style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+                          onClick={() => { setViewingOpeningId(null) }}>
+                          ← Back
+                        </button>
+                      </div>
                     </div>
                   )}
                   <BatchResultsTable
                     candidates={rankCandidates}
                     isComplete={true}
-                    onCallCandidate={handleCallCandidate}
+                    onCallCandidate={canEdit ? handleCallCandidate : null}
+                    canEdit={canEdit}
                   />
                 </div>
               )
@@ -590,6 +743,23 @@ export default function App() {
               )
           })()}
 
+          {/* ── Change Password (all roles) + Manage Access (super_admin only) ── */}
+          {(activePage === 'change-password' ||
+            (authUser?.role === 'super_admin' && (activePage === 'add-user' || activePage === 'user-list'))
+          ) && (
+            <UserManagement
+              onClose={null}
+              initialSection={activePage}
+              onPasswordChanged={({ token }) => {
+                sessionStorage.setItem('auth_token', token)
+                const updated = { ...authUser, must_change_password: false }
+                sessionStorage.setItem('auth_user', JSON.stringify(updated))
+                setAuthUser(updated)
+                if (activePage === 'change-password') setActivePage('dashboard')
+              }}
+            />
+          )}
+
         </main>
       </div>
 
@@ -607,8 +777,7 @@ export default function App() {
             </div>
             <div style={{ fontSize: '0.85rem', color: 'var(--text-2)', marginBottom: 20 }}>
               A candidate with the same{' '}
-              {duplicateModal.existing.email && duplicateModal.existing.email === duplicateModal.existing.email
-                ? 'email or name' : 'name'}{' '}
+              {duplicateModal.existing.email ? 'email or name' : 'name'}{' '}
               was previously submitted to this opening.
             </div>
 
@@ -680,6 +849,8 @@ export default function App() {
           }}
         />
       )}
+
+      {showUserMgmt && <UserManagement onClose={() => setShowUserMgmt(false)} />}
 
     </div>
   )

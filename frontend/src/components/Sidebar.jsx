@@ -22,6 +22,21 @@ function NavIcon({ name }) {
       'M8 21h8',
       'M3 5h18',
     ],
+    lock: [
+      'M19 11H5a2 2 0 00-2 2v7a2 2 0 002 2h14a2 2 0 002-2v-7a2 2 0 00-2-2z',
+      'M7 11V7a5 5 0 0110 0v4',
+    ],
+    'user-plus': [
+      'M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2',
+      'M12 11a4 4 0 100-8 4 4 0 000 8z',
+      'M19 8v6M22 11h-6',
+    ],
+    users: [
+      'M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2',
+      'M9 11a4 4 0 100-8 4 4 0 000 8z',
+      'M23 21v-2a4 4 0 00-3-3.87',
+      'M16 3.13a4 4 0 010 7.75',
+    ],
   }
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -46,7 +61,7 @@ function NavItem({ id, label, icon, activePage, onNavigate, badge, badgeType = '
   )
 }
 
-export default function Sidebar({ activePage, onNavigate, batchData, batchId }) {
+export default function Sidebar({ activePage, onNavigate, batchData, batchId, userRole }) {
   const activeCalls = batchData?.candidates?.filter(c => c.interview_status === 'calling').length || 0
   const callbacks   = batchData?.candidates?.filter(c => c.interview_status === 'callback_scheduled').length || 0
   const hasResults  = (batchData?.candidates?.length ?? 0) > 0
@@ -63,12 +78,7 @@ export default function Sidebar({ activePage, onNavigate, batchData, batchId }) 
       </div>
 
       <nav className="sidebar-nav">
-        <NavItem id="dashboard" label="Dashboard" icon="dashboard" activePage={activePage} onNavigate={onNavigate} />
-
-        <div className="sidebar-section-label">Recruitment</div>
-        <NavItem id="single"  label="Single Candidate" icon="user"    activePage={activePage} onNavigate={onNavigate} />
-        <NavItem id="batch"   label="Batch Pipeline"   icon="folder"  activePage={activePage} onNavigate={onNavigate}
-          badge={isLive ? 'Live' : null} badgeType="live" />
+        <NavItem id="dashboard" label="Job Openings" icon="dashboard" activePage={activePage} onNavigate={onNavigate} />
 
         <div className="sidebar-section-label">Pipeline</div>
         <NavItem id="active-calls" label="Active Calls" icon="phone"    activePage={activePage} onNavigate={onNavigate}
@@ -77,6 +87,15 @@ export default function Sidebar({ activePage, onNavigate, batchData, batchId }) 
           badge={callbacks > 0 ? callbacks : null} badgeType="amber" />
         <NavItem id="rankings"     label="Rankings"     icon="trophy"   activePage={activePage} onNavigate={onNavigate}
           badge={hasResults ? '✓' : null} badgeType="green" />
+
+        <div className="sidebar-section-label">Account</div>
+        <NavItem id="change-password" label="Change Password" icon="lock" activePage={activePage} onNavigate={onNavigate} />
+
+        {userRole === 'super_admin' && <>
+          <div className="sidebar-section-label">Manage Access</div>
+          <NavItem id="add-user"  label="Add User"  icon="user-plus" activePage={activePage} onNavigate={onNavigate} />
+          <NavItem id="user-list" label="User List" icon="users"     activePage={activePage} onNavigate={onNavigate} />
+        </>}
       </nav>
 
       <div className="sidebar-footer">

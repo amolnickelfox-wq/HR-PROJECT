@@ -79,6 +79,7 @@ export default function InputSection({
   batchFiles, onBatchFilesChange, onBatchStart, batchLoading, batchError,
   mode = 'single', // 'single' | 'batch'
   defaultJd = '',
+  readOnly = false,
 }) {
   const [resume,     setResume]     = useState('')
   const [jd,         setJd]         = useState(defaultJd)
@@ -316,24 +317,30 @@ export default function InputSection({
 
       {/* ── Actions ── */}
       <div className="btn-row">
-        <button
-          className="btn-analyze"
-          onClick={handleSubmit}
-          disabled={
-            isBatch
-              ? (batchLoading || !jd.trim() || batchFiles.length === 0)
-              : (loading || !resume.trim() || !jd.trim())
-          }
-        >
-          {isBatch
-            ? batchLoading
-              ? <><div className="spinner" /> Starting pipeline…</>
-              : <>⚡ Run Batch Pipeline</>
-            : loading
-              ? <><div className="spinner" /> Analyzing…</>
-              : <>⚡ Analyze Candidate</>
-          }
-        </button>
+        {readOnly ? (
+          <div style={{ padding: '10px 20px', borderRadius: 8, background: 'var(--bg)', border: '1px solid var(--border)', fontSize: '0.82rem', color: 'var(--text-3)' }}>
+            👁️ View only — you don't have permission to run analysis
+          </div>
+        ) : (
+          <button
+            className="btn-analyze"
+            onClick={handleSubmit}
+            disabled={
+              isBatch
+                ? (batchLoading || !jd.trim() || batchFiles.length === 0)
+                : (loading || !resume.trim() || !jd.trim())
+            }
+          >
+            {isBatch
+              ? batchLoading
+                ? <><div className="spinner" /> Starting pipeline…</>
+                : <>⚡ Run Batch Pipeline</>
+              : loading
+                ? <><div className="spinner" /> Analyzing…</>
+                : <>⚡ Analyze Candidate</>
+            }
+          </button>
+        )}
         <button className="btn-clear" onClick={handleClear}>
           Clear
         </button>

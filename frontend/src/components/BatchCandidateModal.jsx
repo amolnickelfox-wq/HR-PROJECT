@@ -6,7 +6,7 @@ import CandidateCard  from './CandidateCard'
 import ReasonBox      from './ReasonBox'
 import InterviewPanel from './InterviewPanel'
 
-export default function BatchCandidateModal({ candidate, onClose, onCallCandidate }) {
+export default function BatchCandidateModal({ candidate, onClose, onCallCandidate, canEdit = true }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKey)
@@ -119,7 +119,7 @@ export default function BatchCandidateModal({ candidate, onClose, onCallCandidat
                 </div>
               )}
 
-              <InterviewPanel interview={interview} />
+              <InterviewPanel interview={interview} canEdit={canEdit} />
             </section>
           ) : (
             <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-3)' }}>

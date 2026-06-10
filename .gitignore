@@ -16,6 +16,18 @@ pip-log.txt
 .env.*
 !.env.example
 
+# Backend env files
+backend/.env
+backend/.env.*
+backend/!.env.example
+
+# Frontend env files (Vite convention)
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+frontend/.env.*
+!frontend/.env.example
+
 # Logs
 *.log
 

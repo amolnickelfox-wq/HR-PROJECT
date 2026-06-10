@@ -127,7 +127,7 @@ function CallLogBadge({ status, failReason, callbackScheduledAt, isCallback }) {
   )
 }
 
-export default function InterviewPanel({ interview }) {
+export default function InterviewPanel({ interview, canEdit = true }) {
   const [showTranscript,   setShowTranscript]   = useState(false)
   const [resolving,        setResolving]         = useState(false)
   const [resolveMsg,       setResolveMsg]        = useState('')
@@ -136,7 +136,11 @@ export default function InterviewPanel({ interview }) {
     if (!window.confirm('Force resolve this stuck call? This will process any existing recordings or mark it as abandoned.')) return
     setResolving(true)
     try {
-      const res = await fetch(`/interview/force-resolve/${interview.interview_id}`, { method: 'POST' })
+      const token = sessionStorage.getItem('auth_token')
+      const res = await fetch(`/interview/force-resolve/${interview.interview_id}`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
       const data = await res.json()
       setResolveMsg(data.message || 'Done.')
     } catch {
@@ -193,7 +197,7 @@ export default function InterviewPanel({ interview }) {
         </div>
       )}
 
-      {(status === 'calling' || status === 'callback_scheduled') && (
+      {canEdit && (status === 'calling' || status === 'callback_scheduled') && (
         <div className="iv-status iv-status--calling">
           <span className="iv-pulse" />
           {status === 'callback_scheduled'

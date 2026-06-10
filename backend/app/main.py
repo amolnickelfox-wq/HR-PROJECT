@@ -17,6 +17,7 @@ from backend.api.routes.resume    import router as resume_router
 from backend.api.routes.interview import router as interview_router
 from backend.api.routes.batch     import router as batch_router
 from backend.api.routes.openings  import router as openings_router
+from backend.api.routes.auth      import router as auth_router
 
 
 @asynccontextmanager
@@ -25,6 +26,11 @@ async def lifespan(_app: FastAPI):
         _scheduler.start()
         print("[Startup] APScheduler started — callback scheduling enabled")
     _init_db()
+    from backend.app.database import _seed_super_admin
+    sa_user = os.getenv("SUPER_ADMIN_USERNAME", "director")
+    sa_pass = os.getenv("SUPER_ADMIN_PASSWORD", "changeme")
+    _seed_super_admin(sa_user, sa_pass)
+    print(f"[Startup] Super admin '{sa_user}' ready (seeded only if first run)")
     loaded_ivs, loaded_batches, loaded_openings = load_stores()
     interview_store.update(loaded_ivs)
     batch_store.update(loaded_batches)
@@ -51,6 +57,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="AI Recruitment Assistant", version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+app.include_router(auth_router)
 app.include_router(health_router)
 app.include_router(resume_router)
 app.include_router(interview_router)
