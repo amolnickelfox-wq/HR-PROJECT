@@ -10,6 +10,8 @@ except ImportError:
 interview_store: dict = {}
 batch_store:     dict = {}
 opening_store:   dict = {}
+pipeline_store:  dict = {}   # {pipeline_id: pipeline_data}
+opening_pipeline: dict = {}  # {opening_id: pipeline_id}  — one active pipeline per opening
 
 DEFAULT_QUESTIONS = [
     "Tell me a bit about yourself and what brought you to apply for this role.",

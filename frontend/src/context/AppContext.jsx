@@ -1,5 +1,5 @@
-import { createContext, useContext, useState, useEffect, useRef } from 'react'
-import { apiCallbacksDue, apiGetOpenings, apiCreateOpening, apiUpdateOpening, apiDeleteOpening } from '../api/client'
+import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react'
+import { apiCallbacksDue, apiGetOpeningsFull, apiCreateOpening, apiUpdateOpening, apiDeleteOpening } from '../api/client'
 
 const AppContext = createContext(null)
 
@@ -43,26 +43,47 @@ export function AppProvider({ children }) {
     } catch { return [] }
   })
 
-  // Sync openings from backend on mount — merges DB openings with localStorage candidates
-  useEffect(() => {
-    apiGetOpenings().then(r => r.json()).then(dbOpenings => {
-      if (!Array.isArray(dbOpenings) || dbOpenings.length === 0) return
+  // Sync openings + candidates from DB — single call, authoritative, runs every 10s
+  const _syncOpenings = useCallback(() => {
+    apiGetOpeningsFull().then(r => r.json()).then(dbOpenings => {
+      if (!Array.isArray(dbOpenings)) return
       setOpenings(prev => {
         const prevMap = Object.fromEntries(prev.map(o => [o.id, o]))
-        const merged = dbOpenings.map(dbo => ({
-          id:         dbo.id,
-          title:      dbo.title,
-          jd:         dbo.jd || '',
-          createdAt:  dbo.createdAt || '',
-          stats:      prevMap[dbo.id]?.stats      || { total: 0, qualified: 0, done: 0 },
-          batchIds:   prevMap[dbo.id]?.batchIds   || [],
-          candidates: prevMap[dbo.id]?.candidates || [],
-        }))
-        try { localStorage.setItem('recruitai_openings', JSON.stringify(merged)) } catch {}
-        return merged
+        const next = dbOpenings.map(dbo => {
+          const local    = prevMap[dbo.id] || {}
+          const dbCands  = dbo.candidates || []
+          const noDup    = dbCands.filter(c => !c._duplicate_of)
+          const stats    = dbCands.length > 0 ? {
+            total:     noDup.length,
+            qualified: noDup.filter(c => c.filter_status === 'qualified').length,
+            done:      noDup.filter(c =>
+              ['completed', 'failed', 'declined', 'callback_scheduled', 'abandoned'].includes(c.interview_status)
+            ).length,
+          } : (local.stats || { total: 0, qualified: 0, done: 0 })
+          const batchIds = dbCands.length > 0
+            ? [...new Set(dbCands.map(c => c._batchId).filter(Boolean))]
+            : (local.batchIds || [])
+          return {
+            id:         dbo.id,
+            title:      dbo.title,
+            jd:         dbo.jd || '',
+            createdAt:  dbo.createdAt || local.createdAt || '',
+            stats,
+            batchIds,
+            candidates: dbCands.length > 0 ? dbCands : (local.candidates || []),
+          }
+        })
+        try { localStorage.setItem('recruitai_openings', JSON.stringify(next)) } catch {}
+        return next
       })
     }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    _syncOpenings()
+    const interval = setInterval(_syncOpenings, 10_000)
+    return () => clearInterval(interval)
+  }, [_syncOpenings])
 
   const [activeOpeningId, setActiveOpeningId] = useState(() => {
     try { return localStorage.getItem('recruitai_activeOpening') || null } catch { return null }
@@ -93,7 +114,7 @@ export function AppProvider({ children }) {
   const [dismissedCallbacks, setDismissedCallbacks] = useState({})
   const callbackAlertRef = useRef(null)
 
-  // Poll /callbacks/due every 60s
+  // Poll /callbacks/due every 15s — must fire promptly for all users
   useEffect(() => {
     const poll = async () => {
       try {
@@ -104,7 +125,7 @@ export function AppProvider({ children }) {
       } catch (_) {}
     }
     poll()
-    callbackAlertRef.current = setInterval(poll, 60_000)
+    callbackAlertRef.current = setInterval(poll, 15_000)
     return () => clearInterval(callbackAlertRef.current)
   }, [])
 
@@ -302,6 +323,7 @@ export function AppProvider({ children }) {
       addSingleToOpening, updateSingleInterviewInOpening,
       saveOpeningBatch, syncBatchToOpenings,
       findDuplicateInOpening, candidateStatusLabel,
+      syncOpenings: _syncOpenings,
     }}>
       {children}
     </AppContext.Provider>

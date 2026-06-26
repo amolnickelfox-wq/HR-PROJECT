@@ -214,3 +214,44 @@ async def batch_interview_start(batch_id: str, req: BatchCallRequest):
     _save_interview(interview_id, interview_store[interview_id])
     _save_batch(batch_id, batch_store[batch_id])
     return {"interview_id": interview_id, "status": "calling"}
+
+
+@router.get("/calls/active")
+async def get_active_calls():
+    """All candidates currently calling, in-progress, or processing — across all batches and pipelines."""
+    from backend.app.database import _db_engine, _sql
+    if not _db_engine:
+        return {"calls": []}
+    try:
+        with _db_engine.connect() as conn:
+            rows = conn.execute(_sql("""
+                SELECT bc.id, bc.batch_id, bc.single_id, bc.file_name, bc.name,
+                       bc.phone, bc.email, bc.resume_score, bc.filter_status,
+                       bc.interview_id, bc.interview_status, bc.callback_scheduled_at,
+                       COALESCE(b.job_title, jo.title)       AS job_title,
+                       COALESCE(b.opening_id, bc.opening_id) AS opening_id
+                FROM batch_candidates bc
+                LEFT JOIN batches b       ON bc.batch_id = b.id
+                LEFT JOIN job_openings jo ON jo.id = COALESCE(b.opening_id, bc.opening_id)
+                WHERE bc.interview_status IN ('calling', 'in_progress', 'processing', 'callback_scheduled')
+                ORDER BY bc.updated_at DESC NULLS LAST
+            """)).mappings().all()
+    except Exception as e:
+        print(f"[ActiveCalls] DB query failed: {e}")
+        return {"calls": []}
+
+    calls = []
+    for row in rows:
+        c = dict(row)
+        iid = c.get("interview_id")
+        iv  = interview_store.get(iid) if iid else None
+        if iv:
+            c["interview_status"] = iv.get("status", c["interview_status"])
+            c["processing_step"]  = iv.get("processing_step")
+            c["fail_reason"]      = iv.get("fail_reason")
+            c["score_result"]     = iv.get("score_result")
+            c["interview_score"]  = (iv.get("score_result") or {}).get("interview_score")
+            c["name"]             = iv.get("candidate_name") or c.get("name")
+        if c["interview_status"] in ("calling", "in_progress", "processing", "callback_scheduled"):
+            calls.append(c)
+    return {"calls": calls}

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import BatchCandidateModal from './BatchCandidateModal'
+import { apiForceResolve } from '../api/client'
 
 function scoreColor(n) {
   if (n == null) return 'batch-score-none'
@@ -16,6 +17,11 @@ function fmtCallbackTime(iso) {
 }
 
 function StatusBadge({ c }) {
+  // Queue position takes top priority
+  if (c._queue_position) {
+    return <span className="score-verdict score-verdict--sm verdict-medium">⏳ #{c._queue_position} In Queue</span>
+  }
+
   const iid = c.interview_status
   const hasActiveCall = iid && iid !== 'pending'
 
@@ -72,8 +78,20 @@ function StatusBadge({ c }) {
   return <span className="score-verdict score-verdict--sm" style={{ color: 'var(--text-3)' }}>—</span>
 }
 
-export default function BatchResultsTable({ candidates, isComplete = true, onCallCandidate, canEdit = true }) {
-  const [selected, setSelected] = useState(null)
+export default function BatchResultsTable({ candidates, isComplete = true, onCallCandidate, canEdit = true, onResolve, allActiveCalls = [] }) {
+  const [selected,    setSelected]    = useState(null)
+  const [resolvedIds, setResolvedIds] = useState({}) // interview_id → resolved status
+
+  const handleResolve = async (e, c) => {
+    e.stopPropagation()
+    if (!c.interview_id) return
+    try {
+      const res  = await apiForceResolve(c.interview_id)
+      const data = await res.json()
+      setResolvedIds(prev => ({ ...prev, [c.interview_id]: data.status || 'abandoned' }))
+      if (onResolve) onResolve()
+    } catch (_) {}
+  }
 
   const sorted = [...candidates].sort((a, b) => {
     const aQ = a.filter_status === 'qualified'
@@ -84,9 +102,10 @@ export default function BatchResultsTable({ candidates, isComplete = true, onCal
     return (b.resume_score ?? 0) - (a.resume_score ?? 0)
   })
 
-  const qualified  = candidates.filter(c => c.filter_status === 'qualified').length
-  const filtered   = candidates.filter(c => c.filter_status === 'filtered_out' || c.filter_status === 'no_phone').length
-  const doneCount  = candidates.filter(c =>
+  const qualified      = candidates.filter(c => c.filter_status === 'qualified').length
+  const filtered       = candidates.filter(c => c.filter_status === 'filtered_out' || c.filter_status === 'no_phone').length
+  const interviewedCount = candidates.filter(c => c.interview_status === 'completed').length
+  const doneCount      = candidates.filter(c =>
     ['completed', 'abandoned', 'failed', 'callback_scheduled', 'skipped', 'no_phone'].includes(c.interview_status)
   ).length
 
@@ -98,7 +117,9 @@ export default function BatchResultsTable({ candidates, isComplete = true, onCal
         </span>
         <span className="char-count">
           {isComplete
-            ? `${qualified} interviewed · ${filtered} filtered out`
+            ? interviewedCount > 0
+              ? `${interviewedCount} interviewed · ${filtered} filtered out`
+              : `${qualified} qualified · ${filtered} filtered out`
             : `${doneCount} of ${candidates.length} done · click any row for details`
           }
         </span>
@@ -172,19 +193,53 @@ export default function BatchResultsTable({ candidates, isComplete = true, onCal
                   }
                 </td>
                 <td>
-                  <StatusBadge c={c} />
+                  <StatusBadge c={resolvedIds[c.interview_id]
+                    ? { ...c, interview_status: resolvedIds[c.interview_id] }
+                    : c}
+                  />
                 </td>
                 {onCallCandidate && (
-                  <td onClick={e => e.stopPropagation()}>
-                    {c.phone && c.filter_status === 'qualified' && (
-                      <button
-                        className="batch-call-btn"
-                        title={c.filter_status === 'filtered_out' ? 'Call (below threshold)' : 'Call Candidate'}
-                        onClick={() => onCallCandidate(c)}
-                      >
-                        {c.filter_status === 'filtered_out' ? '📞' : '📞 Call'}
-                      </button>
-                    )}
+                  <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                    {(() => {
+                      const effectiveStatus = resolvedIds[c.interview_id] || c.interview_status
+                      const callAge = (() => {
+                        const log = c.call_log
+                        if (!Array.isArray(log) || !log.length) return Infinity
+                        const last = log[log.length - 1]?.started_at
+                        return last ? Date.now() - new Date(last).getTime() : Infinity
+                      })()
+                      // 'calling' can't stay in that state for >2 min (Twilio ring timeout is ~20s)
+                      // 'in_progress' can't exceed ~30 min (7 questions)
+                      const stuckThreshold = effectiveStatus === 'calling'
+                        ? 2 * 60 * 1000
+                        : 35 * 60 * 1000
+                      const isStuck = isComplete && c.interview_id
+                        && ['calling', 'in_progress'].includes(effectiveStatus)
+                        && callAge > stuckThreshold
+                      return (
+                        <>
+                          {isStuck && (
+                            <button
+                              className="batch-call-btn batch-call-btn--filtered"
+                              title="Force-resolve this stuck call"
+                              style={{ marginRight: 6, fontSize: '0.75rem', background: '#fef2f2', color: '#dc2626', border: '1px solid #fca5a5' }}
+                              onClick={(e) => handleResolve(e, c)}
+                            >
+                              ✕ Resolve
+                            </button>
+                          )}
+                          {c.phone && c.filter_status !== 'no_phone' && !isStuck && (
+                            <button
+                              className={`batch-call-btn${c.filter_status !== 'qualified' ? ' batch-call-btn--filtered' : ''}`}
+                              title={c.filter_status !== 'qualified' ? 'Call (below qualification threshold)' : 'Call Candidate'}
+                              onClick={() => onCallCandidate(c)}
+                            >
+                              📞 Call
+                            </button>
+                          )}
+                        </>
+                      )
+                    })()}
                   </td>
                 )}
               </tr>

@@ -61,9 +61,9 @@ function NavItem({ id, label, icon, activePage, onNavigate, badge, badgeType = '
   )
 }
 
-export default function Sidebar({ activePage, onNavigate, batchData, batchId, userRole }) {
-  const activeCalls = batchData?.candidates?.filter(c => c.interview_status === 'calling').length || 0
-  const callbacks   = batchData?.candidates?.filter(c => c.interview_status === 'callback_scheduled').length || 0
+export default function Sidebar({ activePage, onNavigate, batchData, batchId, userRole, activeCallsCount = 0, callbackCount = 0 }) {
+  const activeCalls = activeCallsCount || batchData?.candidates?.filter(c => c.interview_status === 'calling').length || 0
+  const callbacks   = callbackCount || batchData?.candidates?.filter(c => c.interview_status === 'callback_scheduled').length || 0
   const hasResults  = (batchData?.candidates?.length ?? 0) > 0
   const isLive      = batchId && batchData?.status === 'processing'
 

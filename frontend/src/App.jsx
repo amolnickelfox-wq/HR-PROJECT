@@ -13,6 +13,7 @@ import CallbackAlertModal  from './components/CallbackAlertModal'
 import LoginPage         from './components/LoginPage'
 import UserManagement   from './components/UserManagement'
 
+import { apiStartPipeline, apiPipelineStatus, apiStopPipeline, apiActiveCalls, safeJson } from './api/client'
 import { useAppContext }  from './context/AppContext'
 import { useAnalyze }    from './hooks/useAnalyze'
 import { useInterview }  from './hooks/useInterview'
@@ -98,6 +99,7 @@ export default function App() {
     addSingleToOpening, updateSingleInterviewInOpening,
     saveOpeningBatch, syncBatchToOpenings,
     findDuplicateInOpening, candidateStatusLabel,
+    syncOpenings,
   } = useAppContext()
 
   // ── navigation ──
@@ -158,6 +160,113 @@ export default function App() {
     clearAnalyze()
     clearInterview()
   }
+
+  // ── pipeline state ──
+  const [pipelineStatuses, setPipelineStatuses] = useState({}) // {opening_id: status_obj}
+  const pipelinePolls = useRef({}) // {opening_id: intervalId}
+
+  // ── global active calls state ──
+  const [allActiveCalls, setAllActiveCalls] = useState([])
+  const activeCallsPollRef = useRef(null)
+
+  const _pollPipeline = async (openingId) => {
+    try {
+      const res  = await apiPipelineStatus(openingId)
+      const data = await safeJson(res)
+      if (data.status === 'none') {
+        clearInterval(pipelinePolls.current[openingId])
+        delete pipelinePolls.current[openingId]
+        setPipelineStatuses(prev => { const n = {...prev}; delete n[openingId]; return n })
+        syncOpenings()
+        return
+      }
+      setPipelineStatuses(prev => ({ ...prev, [openingId]: data }))
+      if (data.status !== 'running') {
+        clearInterval(pipelinePolls.current[openingId])
+        delete pipelinePolls.current[openingId]
+      }
+      syncOpenings() // keep candidate statuses fresh while pipeline is active
+    } catch {}
+  }
+
+  const handleStartPipeline = async (openingId) => {
+    try {
+      const res  = await apiStartPipeline(openingId)
+      const data = await safeJson(res)
+      if (!res.ok) { alert(data.detail || 'Failed to start pipeline'); return }
+      setPipelineStatuses(prev => ({ ...prev, [openingId]: data }))
+      pipelinePolls.current[openingId] = setInterval(() => _pollPipeline(openingId), 5000)
+    } catch (e) { alert('Failed to start pipeline') }
+  }
+
+  const handleStopPipeline = async (openingId) => {
+    try {
+      await apiStopPipeline(openingId)
+      setPipelineStatuses(prev => ({ ...prev, [openingId]: { ...prev[openingId], status: 'stopped' } }))
+      clearInterval(pipelinePolls.current[openingId])
+      delete pipelinePolls.current[openingId]
+    } catch {}
+  }
+
+  // Poll any running pipeline statuses on mount (e.g. after page refresh)
+  useEffect(() => {
+    openings.forEach(op => {
+      if (!pipelinePolls.current[op.id]) {
+        apiPipelineStatus(op.id).then(r => safeJson(r)).then(data => {
+          if (data.status === 'running') {
+            setPipelineStatuses(prev => ({ ...prev, [op.id]: data }))
+            pipelinePolls.current[op.id] = setInterval(() => _pollPipeline(op.id), 5000)
+          }
+        }).catch(() => {})
+      }
+    })
+    return () => {
+      Object.values(pipelinePolls.current).forEach(clearInterval)
+      pipelinePolls.current = {}
+    }
+  }, [openings.length]) // eslint-disable-line
+
+  // ── When user opens Rankings for a specific opening, immediately check pipeline status ──
+  useEffect(() => {
+    if (activePage !== 'rankings' || !viewingOpeningId) return
+    if (pipelinePolls.current[viewingOpeningId]) return // already polling
+    apiPipelineStatus(viewingOpeningId).then(r => safeJson(r)).then(data => {
+      if (data.status === 'none') return
+      setPipelineStatuses(prev => ({ ...prev, [viewingOpeningId]: data }))
+      if (data.status === 'running' && !pipelinePolls.current[viewingOpeningId]) {
+        pipelinePolls.current[viewingOpeningId] = setInterval(() => _pollPipeline(viewingOpeningId), 5000)
+      }
+    }).catch(() => {})
+  }, [viewingOpeningId, activePage]) // eslint-disable-line
+
+  // ── Poll all active + callback calls globally (always running) ──
+  useEffect(() => {
+    const ms = activePage === 'active-calls' ? 3000 : 6000
+    const poll = () =>
+      apiActiveCalls().then(r => safeJson(r)).then(d => setAllActiveCalls(d.calls || [])).catch(() => {})
+    poll()
+    activeCallsPollRef.current = setInterval(poll, ms)
+    return () => {
+      clearInterval(activeCallsPollRef.current)
+      activeCallsPollRef.current = null
+    }
+  }, [activePage]) // eslint-disable-line
+
+  // ── Heal stale single interview state ──
+  // If interview shows active but DB says it's done, re-fetch the real status
+  useEffect(() => {
+    const iid = interview?.interview_id
+    if (!iid) return
+    if (!['calling', 'in_progress', 'processing'].includes(interview?.status)) return
+    if (!allActiveCalls.length) return
+    const stillActive = allActiveCalls.find(c => c.interview_id === iid)
+    if (!stillActive) {
+      fetch(`/interview/status/${iid}`)
+        .then(r => r.json())
+        .then(d => { if (d?.status && d.status !== interview.status) setInterview(d) })
+        .catch(() => {})
+    }
+  }, [allActiveCalls]) // eslint-disable-line
 
   // Track single-candidate analysis → openings
   useEffect(() => {
@@ -272,17 +381,62 @@ export default function App() {
   }
 
   // ── derived values ──
-  const activeCandidates = batchData?.candidates?.filter(c =>
-    ['calling','in_progress'].includes(c.interview_status)
-  ) || []
-  const callbackCandidates = batchData?.candidates?.filter(c =>
-    c.interview_status === 'callback_scheduled'
-  ) || []
+  const singleActive = (interview && ['calling', 'in_progress', 'processing'].includes(interview.status))
+    ? [{
+        interview_id:     interview.interview_id,
+        name:             interview.candidate_name,
+        phone:            interview.phone,
+        interview_status: interview.status,
+        processing_step:  interview.processing_step,
+        file_name:        interview.candidate_name || 'Single Candidate',
+        filter_status:    'qualified',
+        resume_score:     result ? (parseInt(result.match_score) || null) : null,
+        score_result:     interview.score_result,
+      }]
+    : []
+
+  const activeCandidates = (() => {
+    const base = allActiveCalls.length > 0
+      ? allActiveCalls.filter(c => ['calling', 'in_progress', 'processing'].includes(c.interview_status))
+      : (batchData?.candidates?.filter(c =>
+          ['calling', 'in_progress', 'processing'].includes(c.interview_status)
+        ) || [])
+    const deduped = singleActive.filter(s => !base.find(a => a.interview_id === s.interview_id))
+    return [...base, ...deduped]
+  })()
+
+  const callbackCandidates = (() => {
+    const fromPoll  = allActiveCalls.filter(c => c.interview_status === 'callback_scheduled')
+    const fromBatch = (batchData?.candidates || []).filter(c => c.interview_status === 'callback_scheduled')
+    const fromSingle = interview?.status === 'callback_scheduled'
+      ? [{
+          interview_id:          interview.interview_id,
+          name:                  interview.candidate_name,
+          phone:                 interview.phone,
+          interview_status:      'callback_scheduled',
+          callback_scheduled_at: interview.callback_scheduled_at,
+          file_name:             interview.candidate_name || 'Single Candidate',
+          filter_status:         'qualified',
+          resume_score:          result ? (parseInt(result.match_score) || null) : null,
+        }]
+      : []
+    const seen = new Set()
+    return [...fromPoll, ...fromBatch, ...fromSingle].filter(c => {
+      const key = c.interview_id || c.file_name
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  })()
   const visibleDueCallbacks = dueCallbacks.filter(cb => {
     const snoozedAt = dismissedCallbacks[cb.interview_id]
     if (!snoozedAt) return true
     return Date.now() - snoozedAt > 10 * 60 * 1000
   })
+
+  const nextInQueue = Object.values(pipelineStatuses)
+    .filter(ps => ps.status === 'running')
+    .flatMap(ps => ps.queue || [])
 
   const canEdit = authUser?.role !== 'user'
 
@@ -296,6 +450,8 @@ export default function App() {
         batchData={batchData}
         batchId={batchId}
         userRole={authUser?.role}
+        activeCallsCount={activeCandidates.length + nextInQueue.length}
+        callbackCount={callbackCandidates.length}
       />
 
       <div className="app-body">
@@ -322,6 +478,77 @@ export default function App() {
           {/* ── Dashboard ── */}
           {activePage === 'dashboard' && (
             <div>
+              {(activeCandidates.length > 0 || callbackCandidates.length > 0 || nextInQueue.length > 0) && (
+                <div className="live-panel">
+                  <div className="live-panel-header">
+                    <span className="live-pulse-dot" />
+                    Live Pipeline
+                  </div>
+                  <div className="live-panel-body">
+                    {activeCandidates.length > 0 && (
+                      <div className="live-section" onClick={() => handleNavigate('active-calls')}>
+                        <div className="live-section-label">📞 On Call ({activeCandidates.length})</div>
+                        {activeCandidates.map(c => (
+                          <div className="live-cand" key={c.interview_id || c.file_name}>
+                            <div className="live-avatar live-avatar--active">
+                              {(c.name || c.file_name || '?')[0].toUpperCase()}
+                            </div>
+                            <div className="live-cand-info">
+                              <div className="live-cand-name">{c.name || c.file_name || 'Candidate'}</div>
+                              <div className="live-cand-status live-cand-status--active">
+                                {c.interview_status === 'processing'
+                                  ? `⚙ ${c.processing_step || 'Processing'}`
+                                  : c.interview_status === 'in_progress' ? '🎤 In interview'
+                                  : '📞 Connecting'}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {nextInQueue.length > 0 && (
+                      <div className="live-section">
+                        <div className="live-section-label">⏳ Up Next ({nextInQueue.length})</div>
+                        {nextInQueue.slice(0, 5).map((c, i) => (
+                          <div className="live-cand" key={i}>
+                            <div className="live-avatar live-avatar--queue">
+                              {(c.name || c.file_name || '?')[0].toUpperCase()}
+                            </div>
+                            <div className="live-cand-info">
+                              <div className="live-cand-name">{c.name || c.file_name || 'Candidate'}</div>
+                              <div className="live-cand-status live-cand-status--queue">Queued</div>
+                            </div>
+                          </div>
+                        ))}
+                        {nextInQueue.length > 5 && (
+                          <div className="live-queue-more">+{nextInQueue.length - 5} more waiting</div>
+                        )}
+                      </div>
+                    )}
+                    {callbackCandidates.length > 0 && (
+                      <div className="live-section" onClick={() => handleNavigate('callbacks')}>
+                        <div className="live-section-label">📅 Callbacks ({callbackCandidates.length})</div>
+                        {callbackCandidates.map(c => (
+                          <div className="live-cand" key={c.interview_id || c.file_name}>
+                            <div className="live-avatar live-avatar--callback">
+                              {(c.name || c.file_name || '?')[0].toUpperCase()}
+                            </div>
+                            <div className="live-cand-info">
+                              <div className="live-cand-name">{c.name || c.file_name || 'Candidate'}</div>
+                              <div className="live-cand-status live-cand-status--callback">
+                                {c.callback_scheduled_at
+                                  ? new Date(c.callback_scheduled_at).toLocaleString('en-IN',
+                                      { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+                                  : 'Scheduled'}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="opening-grid">
                 {openings.map(op => {
                   const cands     = op.candidates || []
@@ -424,6 +651,8 @@ export default function App() {
                                 Add Candidates
                               </button>
                             )}
+
+
                           </div>
                         </>
                       )}
@@ -602,39 +831,198 @@ export default function App() {
                 </div>
               )}
               {batchData?.status === 'processing' && <BatchProgress batchData={batchData} />}
-              {batchData?.candidates?.length > 0 && (
-                <>
-                  <BatchResultsTable
-                    candidates={batchData.candidates}
-                    isComplete={batchData.status === 'completed'}
-                    onCallCandidate={canEdit ? handleCallCandidate : null}
-                    canEdit={canEdit}
-                  />
-                  {batchData.status === 'completed' && (
-                    <div className="btn-row" style={{ marginTop: 28 }}>
-                      <button className="btn-clear" onClick={handleBatchReset}>← Start New Batch</button>
-                    </div>
-                  )}
-                </>
-              )}
+              {batchData?.candidates?.length > 0 && (() => {
+                const batchOpening =
+                  (batchData?.opening_id ? openings.find(o => o.id === batchData.opening_id) : null) ||
+                  (activeOpeningId       ? openings.find(o => o.id === activeOpeningId)       : null)
+                return (
+                  <>
+                    {batchData.status === 'completed' && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+                        {batchOpening && (
+                          <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text)' }}>
+                            {batchOpening.title}
+                          </div>
+                        )}
+                        <span className="char-count">
+                          {batchData.candidates.filter(c => !c._duplicate_of && c.filter_status === 'qualified').length} qualified
+                          {' · '}
+                          {batchData.candidates.filter(c => !c._duplicate_of && c.filter_status !== 'qualified').length} filtered
+                        </span>
+                        <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                          {batchOpening && canEdit && (
+                            <button className="btn-analyze" style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                              onClick={() => { setActiveOpening(batchOpening.id); setResult(null); setInterview(null); handleNavigate('single') }}>
+                              👤 Add Single
+                            </button>
+                          )}
+                          {batchOpening && canEdit && (
+                            <button className="btn-analyze" style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                              onClick={() => { setActiveOpening(batchOpening.id); handleBatchReset() }}>
+                              📂 Add Batch
+                            </button>
+                          )}
+                          {batchOpening && canEdit && (() => {
+                            const ps = pipelineStatuses[batchOpening.id]
+                            const qualifiedCount = batchData.candidates.filter(c => !c._duplicate_of && c.filter_status === 'qualified').length
+                            if (ps?.status === 'running') return (
+                              <>
+                                <span style={{ fontSize: '0.8rem', color: '#1d4ed8', background: '#eff6ff', padding: '5px 12px', borderRadius: 6, border: '1px solid #bfdbfe', whiteSpace: 'nowrap' }}>
+                                  {ps.active_count} active · {ps.queue_remaining} queued · {ps.completed_count} done
+                                </span>
+                                <button className="btn-clear" style={{ padding: '6px 14px', fontSize: '0.8rem', color: '#ef4444', borderColor: '#fca5a5' }}
+                                  onClick={() => handleStopPipeline(batchOpening.id)}>
+                                  Stop
+                                </button>
+                              </>
+                            )
+                            if (ps?.status === 'completed' || ps?.status === 'stopped') return (
+                              <span style={{ fontSize: '0.8rem', color: '#059669', background: '#f0fdf4', padding: '5px 12px', borderRadius: 6, border: '1px solid #a7f3d0', whiteSpace: 'nowrap' }}>
+                                ✓ {ps.completed_count} interviewed
+                              </span>
+                            )
+                            if (qualifiedCount > 0) return (
+                              <button className="btn-analyze" style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                                onClick={() => handleStartPipeline(batchOpening.id)}>
+                                📞 Call All Qualified ({qualifiedCount})
+                              </button>
+                            )
+                            return null
+                          })()}
+                          {batchOpening && (
+                            <button className="btn-clear" style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+                              onClick={() => { setViewingOpeningId(batchOpening.id); handleNavigate('rankings') }}>
+                              📊 View Rankings
+                            </button>
+                          )}
+                          <button className="btn-clear" style={{ padding: '6px 14px', fontSize: '0.8rem' }} onClick={handleBatchReset}>← Back</button>
+                        </div>
+                      </div>
+                    )}
+                    <BatchResultsTable
+                      candidates={batchData.candidates}
+                      isComplete={batchData.status === 'completed'}
+                      onCallCandidate={canEdit ? handleCallCandidate : null}
+                      canEdit={canEdit}
+                    />
+                  </>
+                )
+              })()}
             </div>
           )}
 
           {/* ── Active Calls ── */}
-          {activePage === 'active-calls' && (
-            activeCandidates.length > 0
-              ? <BatchResultsTable candidates={activeCandidates} isComplete={false} />
-              : (
-                <div className="db-empty-state">
-                  <div className="db-empty-icon">📞</div>
-                  <div className="db-empty-title">No active calls right now</div>
-                  <div className="db-empty-desc">Start a batch pipeline to see live call status here.</div>
-                  <button className="btn-analyze" onClick={() => handleNavigate('batch')}>
-                    Go to Batch Pipeline
-                  </button>
-                </div>
-              )
-          )}
+          {activePage === 'active-calls' && (() => {
+            // Build queue-position map: candidate name → queue position (1-indexed)
+            const queuePosMap = {}
+            Object.values(pipelineStatuses).forEach(ps => {
+              ;(ps.queue || []).forEach((c, i) => {
+                const key = c.name || c.file_name
+                if (key && !queuePosMap[key]) queuePosMap[key] = i + 1
+              })
+            })
+
+            // Build live-status map from allActiveCalls
+            const liveMap = {}
+            allActiveCalls.forEach(ac => {
+              if (ac.name) liveMap[ac.name] = ac
+            })
+
+            // Gather base candidates from all pipeline openings
+            const pipelineOpeningIds = Object.keys(pipelineStatuses)
+            let rows = []
+            pipelineOpeningIds.forEach(oid => {
+              const op = openings.find(o => o.id === oid)
+              if (op?.candidates?.length > 0) {
+                op.candidates.forEach(c => { if (!rows.some(r => r.name === c.name)) rows.push(c) })
+              }
+            })
+
+            // Fallback: if opening candidates not loaded yet, show active calls + queue
+            if (rows.length === 0) {
+              rows = [...allActiveCalls]
+              Object.values(pipelineStatuses).forEach(ps => {
+                ;(ps.queue || []).forEach(c => {
+                  if (!rows.some(r => r.name === c.name)) rows.push(c)
+                })
+              })
+            }
+
+            // Overlay live status + add queue position
+            rows = rows.map(r => {
+              const live = liveMap[r.name]
+              const qPos = queuePosMap[r.name || r.file_name]
+              return {
+                ...r,
+                ...(live ? { interview_status: live.interview_status, processing_step: live.processing_step || null } : {}),
+                ...(qPos ? { _queue_position: qPos } : {}),
+              }
+            })
+
+            // Sort: in-call → processing → queued (by pos) → callback → completed → failed/abandoned
+            const statusOrder = s => {
+              if (s === 'calling' || s === 'in_progress') return 0
+              if (s === 'processing') return 1
+              if (s === 'callback_scheduled') return 3
+              if (s === 'completed') return 4
+              return 5
+            }
+            rows.sort((a, b) => {
+              if (a._queue_position && b._queue_position) return a._queue_position - b._queue_position
+              if (a._queue_position) return 1   // queued after active
+              if (b._queue_position) return -1
+              const oa = statusOrder(a.interview_status), ob = statusOrder(b.interview_status)
+              if (oa !== ob) return oa - ob
+              return (b.resume_score || 0) - (a.resume_score || 0)
+            })
+
+            const pipelineSummaries = Object.entries(pipelineStatuses).filter(([, ps]) => ps.status !== 'none')
+
+            if (rows.length === 0 && pipelineSummaries.length === 0) return (
+              <div className="db-empty-state">
+                <div className="db-empty-icon">📞</div>
+                <div className="db-empty-title">No active calls right now</div>
+                <div className="db-empty-desc">Start a batch pipeline to see live call status here.</div>
+                <button className="btn-analyze" onClick={() => handleNavigate('batch')}>
+                  Go to Batch Pipeline
+                </button>
+              </div>
+            )
+
+            return (
+              <div>
+                {pipelineSummaries.map(([oid, ps]) => {
+                  const op = openings.find(o => o.id === oid)
+                  return (
+                    <div key={oid} style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+                      <div style={{ fontWeight: 700 }}>{op?.title || 'Pipeline'}</div>
+                      <span className="char-count">
+                        {ps.active_count} in call · {ps.queue_remaining} queued · {ps.completed_count} completed · {ps.skipped_count} skipped
+                      </span>
+                      <span className={`score-verdict score-verdict--sm ${ps.status === 'running' ? 'verdict-medium' : 'verdict-high'}`} style={{ marginLeft: 'auto' }}>
+                        {ps.status === 'running' ? '● Running' : ps.status === 'stopped' ? '■ Stopped' : '✓ Completed'}
+                      </span>
+                      {ps.status === 'running' && (
+                        <button
+                          className="btn-clear"
+                          style={{ padding: '5px 12px', fontSize: '0.78rem', color: '#ef4444', borderColor: '#fca5a5' }}
+                          onClick={() => handleStopPipeline(oid)}
+                        >
+                          ■ Stop Pipeline
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+                <BatchResultsTable
+                  candidates={rows}
+                  isComplete={false}
+                  onCallCandidate={canEdit ? handleCallCandidate : null}
+                  canEdit={canEdit}
+                />
+              </div>
+            )
+          })()}
 
           {/* ── Callbacks ── */}
           {activePage === 'callbacks' && (
@@ -656,9 +1044,14 @@ export default function App() {
 
           {/* ── Rankings ── */}
           {activePage === 'rankings' && (() => {
-            const viewOpening = viewingOpeningId ? openings.find(o => o.id === viewingOpeningId) : null
+            const viewOpening =
+              (viewingOpeningId  ? openings.find(o => o.id === viewingOpeningId)          : null) ||
+              (batchData?.opening_id ? openings.find(o => o.id === batchData.opening_id) : null) ||
+              (activeOpeningId   ? openings.find(o => o.id === activeOpeningId)           : null)
             const savedCandidates = viewOpening?.candidates?.length > 0 ? viewOpening.candidates : null
-            const liveCandidates  = batchData?.candidates?.length > 0   ? batchData.candidates   : null
+            // Only use batchData if it belongs to the opening being viewed (prevents stale data from deleted openings leaking in)
+            const batchBelongsHere = !viewOpening || (batchData?.opening_id && batchData.opening_id === viewOpening.id)
+            const liveCandidates  = (batchBelongsHere && batchData?.candidates?.length > 0) ? batchData.candidates : null
             const rankCandidates  = savedCandidates || liveCandidates
             return rankCandidates
               ? (
@@ -668,7 +1061,7 @@ export default function App() {
                       <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text)' }}>
                         {viewOpening.title}
                       </div>
-                      <span className="char-count">{viewOpening.candidates.length} candidate{viewOpening.candidates.length !== 1 ? 's' : ''} · all runs</span>
+                      <span className="char-count">{rankCandidates.length} candidate{rankCandidates.length !== 1 ? 's' : ''}{viewingOpeningId ? ' · all runs' : savedCandidates ? ' · all runs' : ' · current batch'}</span>
                       <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
                         {canEdit && <button className="btn-analyze"
                           style={{ fontSize: '0.85rem', padding: '8px 18px' }}
@@ -680,8 +1073,35 @@ export default function App() {
                           onClick={() => { setActiveOpening(viewOpening.id); handleBatchReset(); handleNavigate('batch') }}>
                           📂 Add Batch
                         </button>}
+                        {canEdit && (() => {
+                          const ps = pipelineStatuses[viewOpening.id]
+                          const qualifiedCount = (viewOpening.candidates || rankCandidates || []).filter(c => !c._duplicate_of && c.filter_status === 'qualified').length
+                          if (ps?.status === 'running') return (
+                            <>
+                              <span style={{ fontSize: '0.8rem', color: '#1d4ed8', background: '#eff6ff', padding: '5px 12px', borderRadius: 6, border: '1px solid #bfdbfe', whiteSpace: 'nowrap' }}>
+                                {ps.active_count} active · {ps.queue_remaining} queued · {ps.completed_count} done
+                              </span>
+                              <button className="btn-clear" style={{ padding: '6px 14px', fontSize: '0.8rem', color: '#ef4444', borderColor: '#fca5a5' }}
+                                onClick={() => handleStopPipeline(viewOpening.id)}>
+                                Stop
+                              </button>
+                            </>
+                          )
+                          if (ps?.status === 'completed' || ps?.status === 'stopped') return (
+                            <span style={{ fontSize: '0.8rem', color: '#059669', background: '#f0fdf4', padding: '5px 12px', borderRadius: 6, border: '1px solid #a7f3d0', whiteSpace: 'nowrap' }}>
+                              ✓ {ps.completed_count} interviewed
+                            </span>
+                          )
+                          if (qualifiedCount > 0) return (
+                            <button className="btn-analyze" style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                              onClick={() => handleStartPipeline(viewOpening.id)}>
+                              📞 Call All Qualified ({qualifiedCount})
+                            </button>
+                          )
+                          return null
+                        })()}
                         <button className="btn-clear" style={{ padding: '6px 14px', fontSize: '0.8rem' }}
-                          onClick={() => { setViewingOpeningId(null) }}>
+                          onClick={() => { setViewingOpeningId(null); handleNavigate('dashboard') }}>
                           ← Back
                         </button>
                       </div>
@@ -692,6 +1112,8 @@ export default function App() {
                     isComplete={true}
                     onCallCandidate={canEdit ? handleCallCandidate : null}
                     canEdit={canEdit}
+                    onResolve={canEdit ? syncOpenings : null}
+                    allActiveCalls={allActiveCalls}
                   />
                 </div>
               )

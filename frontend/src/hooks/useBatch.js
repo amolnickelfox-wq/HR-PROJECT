@@ -19,7 +19,7 @@ export function useBatch({ onSyncToOpenings, onAutoSaveJd, getActiveOpeningTitle
         setBatchData(data)
         if (data.candidates?.length) onSyncToOpenings?.(id, data.candidates)
         const hasActive = data.candidates?.some(c =>
-          ['calling', 'in_progress', 'processing'].includes(c.interview_status)
+          ['calling', 'in_progress', 'processing', 'callback_scheduled'].includes(c.interview_status)
         )
         if (data.status === 'completed' && !hasActive) return
         const interval = hasActive || data.status === 'processing' ? 2500 : 6000
@@ -90,6 +90,7 @@ export function useBatch({ onSyncToOpenings, onAutoSaveJd, getActiveOpeningTitle
         return
       }
 
+      const pid = candidate._batchId || currentBatchId
       if (batchData) {
         setBatchData(prev => ({
           ...prev,
@@ -99,9 +100,8 @@ export function useBatch({ onSyncToOpenings, onAutoSaveJd, getActiveOpeningTitle
               : c
           ),
         }))
-        const pid = candidate._batchId || currentBatchId
-        if (pid) startBatchPolling(pid)
       }
+      if (pid) startBatchPolling(pid)
 
       if (viewingOpeningId && setOpenings && saveOpenings) {
         setOpenings(prev => {

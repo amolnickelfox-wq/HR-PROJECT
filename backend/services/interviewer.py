@@ -204,6 +204,10 @@ def start_twilio_call(phone_number: str, interview_id: str) -> dict:
         status_callback_event=["initiated", "ringing", "answered", "completed"],
         timeout=20,
         record=True,
+        machine_detection="DetectMessageEnd",
+        machine_detection_timeout=30,
+        async_amd=True,
+        async_amd_status_callback=f"{base_url}/twilio/amd/{interview_id}",
     )
     print(f"[Twilio] Call initiated — SID={call.sid}")
     return {"call_sid": call.sid}
@@ -245,7 +249,7 @@ def transcribe_recording(recording_url: str, *, fast: bool = False) -> str:
     result = client.audio.transcriptions.create(
         file=("answer.mp3", audio_resp.content),
         model=model,
-        language="en",
+        language="hi",
         temperature=0,
         prompt="Interviewer: Tell me about your experience. Candidate:",
     )

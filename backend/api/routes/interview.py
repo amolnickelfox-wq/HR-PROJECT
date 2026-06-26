@@ -37,9 +37,14 @@ _TRANSITIONS = [
 ]
 
 REPEAT_KEYWORDS = [
+    # English
     "repeat", "say that again", "again please", "pardon",
     "didn't hear", "didn't understand", "come again", "what was the question",
     "can you repeat", "please repeat",
+    # Hindi transliterated
+    "dobara", "phir se", "dobara puchiye", "dobara boliye",
+    "samjha nahi", "suna nahi", "sunai nahi", "samajh nahi",
+    "ek baar aur", "wapas", "phir bolo",
 ]
 
 
@@ -125,9 +130,21 @@ def _detect_consent(text: str) -> bool:
     if not t:
         return False
 
-    no_words  = ["no", "nope", "nah", "not", "busy", "later", "bad time", "can't", "cannot", "different"]
-    yes_words = ["yes", "yeah", "yep", "sure", "okay", "ok", "good", "fine", "ready",
-                 "go ahead", "of course", "absolutely", "now", "perfect", "great"]
+    no_words  = [
+        # English
+        "no", "nope", "nah", "not", "busy", "later", "bad time", "can't", "cannot", "different",
+        # Hindi transliterated
+        "nahi", "nhi", "nahin", "abhi nahi", "nahi ji",
+    ]
+    yes_words = [
+        # English
+        "yes", "yeah", "yep", "sure", "okay", "ok", "good", "fine", "ready",
+        "go ahead", "of course", "absolutely", "now", "perfect", "great",
+        # Hindi transliterated — common affirmatives and fillers meaning yes
+        "ha", "haan", "haa", "han", "hnji",
+        "ji", "ji haan", "haan ji", "ji han",
+        "bilkul", "zaroor", "acha", "accha", "theek", "theek hai", "theek h",
+    ]
 
     has_no  = any(re.search(r'\b' + re.escape(w) + r'\b', t) for w in no_words)
     has_yes = any(re.search(r'\b' + re.escape(w) + r'\b', t) for w in yes_words)
@@ -146,11 +163,11 @@ def _detect_consent(text: str) -> bool:
             resp = client.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=5,
-                system="You classify spoken responses. Reply with only the word YES or NO.",
+                system="You classify spoken phone responses from job candidates in India. The candidate may respond in English, Hindi, or Hinglish. Reply with only the word YES or NO.",
                 messages=[{"role": "user", "content":
                     f"A candidate was asked: \"Is this a good time for a job interview?\"\n"
                     f"They responded: \"{text}\"\n"
-                    f"Are they agreeing to proceed with the interview right now? Reply YES or NO only."
+                    f"Are they agreeing to proceed? Hindi affirmatives: ha, haan, ji, bilkul, theek hai, acha, zaroor. Hindi negatives: nahi, nhi, na. Reply YES or NO only."
                 }],
             )
             result = resp.content[0].text.strip().upper()
@@ -176,12 +193,16 @@ def _parse_callback_time(raw: str) -> str | None:
             f"The candidate said: \"{raw}\"\n"
             f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p')} IST.\n\n"
             "Convert what they said into an exact ISO 8601 datetime (e.g. 2025-05-14T15:00:00).\n"
-            "Handle all of these correctly:\n"
-            "- Relative: 'after 30 minutes' → now + 30 min, 'in an hour' → now + 1 hour, 'in 2 hours' → now + 2 hours\n"
-            "- Today: 'today at 5pm' → today 17:00, 'tonight at 8' → today 20:00\n"
-            "- Named day: 'tomorrow at 3pm' → tomorrow 15:00, 'Friday at 2pm' → next Friday 14:00\n"
-            "- Vague: 'morning' → next day 10:00, 'afternoon' → next day 14:00, 'evening' → next day 18:00\n"
-            "- Ambiguous hour (e.g. 'at 1', 'at 2', 'at 3' with no AM/PM): assume PM (13:00, 14:00, 15:00) during business hours (9am–8pm range). Only use AM if the candidate explicitly says AM or mentions midnight/early morning.\n"
+            "The candidate may speak in English, Hindi, or Hinglish. Handle all of these correctly:\n"
+            "- Relative (English): 'after 30 minutes' → now + 30 min, 'in an hour' → now + 1 hour, 'in 2 hours' → now + 2 hours\n"
+            "- Relative (Hindi): '10 minute baad' → now + 10 min, 'ek ghante baad' → now + 1 hour, 'do ghante baad' → now + 2 hours, 'adhe ghante baad' → now + 30 min\n"
+            "- Today (English): 'today at 5pm' → today 17:00, 'tonight at 8' → today 20:00\n"
+            "- Today (Hindi): 'aaj 5 baje' → today 17:00, 'aaj shaam ko' → today 18:00, 'aaj raat ko' → today 20:00\n"
+            "- Named day (English): 'tomorrow at 3pm' → tomorrow 15:00, 'Friday at 2pm' → next Friday 14:00\n"
+            "- Named day (Hindi): 'kal' → tomorrow, 'kal subah' → tomorrow 10:00, 'kal shaam' → tomorrow 18:00, 'kal 3 baje' → tomorrow 15:00\n"
+            "- Vague (English): 'morning' → next day 10:00, 'afternoon' → next day 14:00, 'evening' → next day 18:00\n"
+            "- Vague (Hindi): 'subah' → next day 10:00, 'dopahar' → next day 14:00, 'shaam' → next day 18:00, 'raat' → next day 20:00\n"
+            "- Ambiguous hour (e.g. 'at 1', 'at 2', '2 baje', '3 baje' with no AM/PM): assume PM (13:00, 14:00, 15:00) during business hours (9am–8pm range). Only use AM if the candidate explicitly says AM or mentions midnight/early morning.\n"
             "Return ONLY the ISO 8601 string. If you truly cannot interpret it, return the word null."
         )
         resp = client.messages.create(
@@ -208,82 +229,102 @@ def _process_interview(interview_id: str):
         print(f"[Process] {interview_id} already processing — skipping duplicate")
         return
     data["_processing_started"] = True
+    try:
+        questions  = data["questions"]
+        recordings = data.get("recordings", {})
+        total      = len(questions)
 
-    questions  = data["questions"]
-    recordings = data.get("recordings", {})
-    total      = len(questions)
+        lines = []
+        consent_raw = data.get("consent_raw")
+        if consent_raw:
+            lines.append(f"Interviewer: Is this a good time for the interview?\nCandidate: {consent_raw}")
 
-    lines = []
-    consent_raw = data.get("consent_raw")
-    if consent_raw:
-        lines.append(f"Interviewer: Is this a good time for the interview?\nCandidate: {consent_raw}")
+        done_count = 0
+        answers    = {}
+        cached_transcriptions = data.get("transcriptions", {})
 
-    done_count = 0
-    answers    = {}
-    cached_transcriptions = data.get("transcriptions", {})
+        def transcribe_one(i):
+            # Reuse inline transcription if available (avoids duplicate Groq call)
+            cached = cached_transcriptions.get(i) or cached_transcriptions.get(str(i))
+            if cached:
+                return i, cached
+            rec_url = recordings.get(i)
+            if not rec_url:
+                return i, "[no recording]"
+            try:
+                return i, transcribe_recording(rec_url)
+            except Exception as e:
+                return i, f"[transcription error: {e}]"
 
-    def transcribe_one(i):
-        rec_url = recordings.get(i)
-        if not rec_url:
-            return i, "[no recording]"
+        data["processing_step"] = f"Transcribing 0 / {total}"
+        _save_interview(interview_id, data)
+
+        with ThreadPoolExecutor(max_workers=min(total, 6)) as pool:
+            futures = {pool.submit(transcribe_one, i): i for i in range(total)}
+            for fut in as_completed(futures):
+                i, answer = fut.result()
+                answers[i] = answer
+                done_count += 1
+                data["processing_step"] = f"Transcribing {done_count} / {total}"
+                _save_interview(interview_id, data)
+
+        # Write all transcriptions (including any re-transcribed timed-out ones) back to
+        # data so _save_transcript_entries gets the complete set
+        data["transcriptions"].update(answers)
+
+        for i, question in enumerate(questions):
+            lines.append(f"Q{i+1}: {question}\nA{i+1}: {answers.get(i, '[no recording]')}")
+
+        full_transcript = "\n\n".join(lines)
+
+        data["processing_step"] = "Scoring interview…"
+        _save_interview(interview_id, data)
+
         try:
-            return i, transcribe_recording(rec_url)
+            score_result = score_interview(full_transcript, questions, data["jd_text"])
         except Exception as e:
-            return i, f"[transcription error: {e}]"
+            score_result = {
+                "interview_score":    "Error",
+                "communication":      {"score": 0, "max": 35},
+                "confidence":         {"score": 0, "max": 30},
+                "motivation_fit":     {"score": 0, "max": 20},
+                "behavioral_quality": {"score": 0, "max": 15},
+                "verdict":            "Error",
+                "strengths":          [],
+                "improvements":       [],
+                "summary":            f"Scoring failed: {e}",
+            }
 
-    data["processing_step"] = f"Transcribing 0 / {total}"
-    _save_interview(interview_id, data)
+        call_log = data.get("call_log", [])
+        if call_log and call_log[-1].get("status") in ("processing", "calling"):
+            call_log[-1]["status"] = "completed"
+            call_log[-1].setdefault("ended_at", datetime.now().isoformat())
 
-    with ThreadPoolExecutor(max_workers=min(total, 6)) as pool:
-        futures = {pool.submit(transcribe_one, i): i for i in range(total)}
-        for fut in as_completed(futures):
-            i, answer = fut.result()
-            answers[i] = answer
-            done_count += 1
-            data["processing_step"] = f"Transcribing {done_count} / {total}"
-            _save_interview(interview_id, data)
-
-    for i, question in enumerate(questions):
-        lines.append(f"Q{i+1}: {question}\nA{i+1}: {answers.get(i, '[no recording]')}")
-
-    full_transcript = "\n\n".join(lines)
-
-    data["processing_step"] = "Scoring interview…"
-    _save_interview(interview_id, data)
-
-    try:
-        score_result = score_interview(full_transcript, questions, data["jd_text"])
-    except Exception as e:
-        score_result = {
-            "interview_score":    "Error",
-            "communication":      {"score": 0, "max": 35},
-            "confidence":         {"score": 0, "max": 30},
-            "motivation_fit":     {"score": 0, "max": 20},
-            "behavioral_quality": {"score": 0, "max": 15},
-            "verdict":            "Error",
-            "strengths":          [],
-            "improvements":       [],
-            "summary":            f"Scoring failed: {e}",
+        interview_store[interview_id] = {
+            **data,
+            "status":       "completed",
+            "transcript":   full_transcript,
+            "score_result": score_result,
+            "call_log":     call_log,
         }
+        try:
+            _save_interview(interview_id, interview_store[interview_id])
+            _save_transcript_entries(interview_id, interview_store[interview_id])
+            _sync_candidate_interview(interview_id, interview_store[interview_id])
+        except Exception as e:
+            print(f"[Process] Final save failed for {interview_id}: {e}")
 
-    call_log = data.get("call_log", [])
-    if call_log and call_log[-1].get("status") in ("processing", "calling"):
-        call_log[-1]["status"] = "completed"
-        call_log[-1].setdefault("ended_at", datetime.now().isoformat())
-
-    interview_store[interview_id] = {
-        **data,
-        "status":       "completed",
-        "transcript":   full_transcript,
-        "score_result": score_result,
-        "call_log":     call_log,
-    }
-    try:
-        _save_interview(interview_id, interview_store[interview_id])
-        _save_transcript_entries(interview_id, interview_store[interview_id])
-        _sync_candidate_interview(interview_id, interview_store[interview_id])
-    except Exception as e:
-        print(f"[Process] Final save failed for {interview_id}: {e}")
+        try:
+            from backend.api.routes.pipeline import _on_pipeline_call_ended
+            _on_pipeline_call_ended(interview_id, "completed")
+        except Exception:
+            pass
+    finally:
+        # Always clear the in-progress guard so force_resolve can retry on crash
+        data.pop("_processing_started", None)
+        iv = interview_store.get(interview_id)
+        if iv:
+            iv.pop("_processing_started", None)
 
 
 class _QuestionsRequest(BaseModel):
@@ -443,18 +484,21 @@ async def force_resolve_interview(interview_id: str, background_tasks: Backgroun
     if not data:
         raise HTTPException(404, "Interview not found.")
     if data["status"] in ("completed", "processing"):
+        _sync_candidate_interview(interview_id, data)  # fix any stale batch_candidates row
         return {"interview_id": interview_id, "status": data["status"], "message": "Already resolved."}
 
     recordings = data.get("recordings", {})
     if recordings:
         data["status"] = "processing"
         _save_interview(interview_id, data)
+        _sync_candidate_interview(interview_id, data)
         background_tasks.add_task(_process_interview, interview_id)
         return {"interview_id": interview_id, "status": "processing", "message": "Processing started."}
     else:
         data["status"]      = "abandoned"
         data["fail_reason"] = "Force resolved — no recordings found"
         _save_interview(interview_id, data)
+        _sync_candidate_interview(interview_id, data)
         return {"interview_id": interview_id, "status": "abandoned", "message": "Marked as abandoned — no recordings."}
 
 
@@ -502,7 +546,7 @@ async def twilio_start(interview_id: str):
         f"I'm reaching out regarding your application for the {safe_title} role. "
         f"<break time='300ms'/>"
         f"</Say>"
-        f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
+        f"<Gather input='speech' speechTimeout='3' language='hi-IN en-IN' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
         f"<Say voice='Google.en-IN-Neural2-A'>"
         f"I'd like to conduct a brief screening round — it should only take about 5 to 7 minutes. Would now be a good time?"
         f"</Say>"
@@ -545,7 +589,7 @@ async def twilio_consent(
             _save_interview(interview_id, data)
             return _xml(
                 f"<Response>"
-                f"<Gather input='speech' speechTimeout='3' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
+                f"<Gather input='speech' speechTimeout='3' language='hi-IN en-IN' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
                 f"<Say voice='Google.en-IN-Neural2-A'>Oh, I'm sorry about that — I didn't quite catch your response! Could you let me know — just say yes if you're ready, or no if now isn't the best time?</Say>"
                 f"</Gather>"
                 f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
@@ -556,6 +600,12 @@ async def twilio_consent(
             data["fail_reason"]    = "No response during consent check"
             data["consent_status"] = "declined"
             _save_interview(interview_id, data)
+            _sync_candidate_interview(interview_id, data)
+            try:
+                from backend.api.routes.pipeline import _on_pipeline_call_ended
+                _on_pipeline_call_ended(interview_id, "no_answer")
+            except Exception:
+                pass
             return _hangup_xml()
 
     if _detect_consent(transcript):
@@ -571,7 +621,7 @@ async def twilio_consent(
             f"<break time='400ms'/>"
             f"Alright, let's get started! "
             f"<break time='400ms'/>"
-            f"Alright, here's my first question — "
+            f"Here's my first question — "
             f"<break time='300ms'/>"
             f"{safe_q0}"
             f"</Say>"
@@ -587,7 +637,7 @@ async def twilio_consent(
         _save_interview(interview_id, data)
         return _xml(
             f"<Response>"
-            f"<Gather input='speech' speechTimeout='4' action='{base_url}/twilio/callback-time/{interview_id}' method='POST'>"
+            f"<Gather input='speech' speechTimeout='4' language='hi-IN en-IN' action='{base_url}/twilio/callback-time/{interview_id}' method='POST'>"
             f"<Say voice='Google.en-IN-Neural2-A'>"
             f"Of course, completely understandable! "
             f"Could you let me know a time that works better for you? "
@@ -605,71 +655,95 @@ async def twilio_callback_time(
     SpeechResult: str = Form(default=None),
     RecordingUrl: str = Form(default=None),
 ):
-    data = _get_interview(interview_id)
-    if not data:
-        return _hangup_xml()
+    try:
+        data = _get_interview(interview_id)
+        if not data:
+            return _hangup_xml()
 
-    raw_time = SpeechResult or ""
-    if not raw_time and RecordingUrl:
-        try:
-            raw_time = transcribe_recording(RecordingUrl)
-            print(f"[CallbackTime] interview={interview_id} transcribed='{raw_time}'")
-        except Exception as e:
-            print(f"[CallbackTime] transcription failed: {e}")
-
-    print(f"[CallbackTime] interview={interview_id} raw='{raw_time}'")
-
-    data["callback_time_raw"] = raw_time
-    dt_str = _parse_callback_time(raw_time) if raw_time else None
-    call_log = data.get("call_log", [])
-
-    if dt_str:
-        data["callback_scheduled_at"] = dt_str
-        data["status"] = "callback_scheduled"
-        if call_log:
-            call_log[-1]["status"]               = "callback_scheduled"
-            call_log[-1]["ended_at"]             = datetime.now().isoformat()
-            call_log[-1]["callback_scheduled_at"] = dt_str
-        if _SCHEDULER_OK:
+        raw_time = SpeechResult or ""
+        if not raw_time and RecordingUrl:
             try:
-                dt = datetime.fromisoformat(dt_str)
-                _scheduler.add_job(
-                    _trigger_callback_call, 'date',
-                    run_date=dt, args=[interview_id],
-                    id=f"callback_{interview_id}", replace_existing=True,
-                    misfire_grace_time=3600,
-                )
-                print(f"[Callback] Scheduled {interview_id} at {dt_str}")
+                raw_time = transcribe_recording(RecordingUrl)
+                print(f"[CallbackTime] interview={interview_id} transcribed='{raw_time}'")
             except Exception as e:
-                print(f"[Callback] Schedule failed: {e}")
-        _save_interview(interview_id, data)
-        try:
-            readable = datetime.fromisoformat(dt_str).strftime("%A at %I:%M %p")
-        except Exception:
-            readable = "the time you mentioned"
+                print(f"[CallbackTime] transcription failed: {e}")
+
+        print(f"[CallbackTime] interview={interview_id} raw='{raw_time}'")
+
+        data["callback_time_raw"] = raw_time
+        dt_str = _parse_callback_time(raw_time) if raw_time else None
+        call_log = data.get("call_log", [])
+
+        if dt_str:
+            data["callback_scheduled_at"] = dt_str
+            data["status"] = "callback_scheduled"
+            if call_log:
+                call_log[-1]["status"]               = "callback_scheduled"
+                call_log[-1]["ended_at"]             = datetime.now().isoformat()
+                call_log[-1]["callback_scheduled_at"] = dt_str
+            # Save BEFORE scheduling — prevents orphaned APScheduler jobs if save throws
+            _save_interview(interview_id, data)
+            _sync_candidate_interview(interview_id, data)
+            try:
+                from backend.api.routes.pipeline import _on_pipeline_call_ended
+                _on_pipeline_call_ended(interview_id, "callback")
+            except Exception:
+                pass
+            if _SCHEDULER_OK:
+                try:
+                    dt = datetime.fromisoformat(dt_str)
+                    _scheduler.add_job(
+                        _trigger_callback_call, 'date',
+                        run_date=dt, args=[interview_id],
+                        id=f"callback_{interview_id}", replace_existing=True,
+                        misfire_grace_time=3600,
+                    )
+                    print(f"[Callback] Scheduled {interview_id} at {dt_str}")
+                except Exception as e:
+                    print(f"[Callback] Schedule failed: {e}")
+            try:
+                readable = datetime.fromisoformat(dt_str).strftime("%A at %I:%M %p")
+            except Exception:
+                readable = "the time you mentioned"
+            return _xml(
+                f"<Response>"
+                f"<Say voice='Google.en-IN-Neural2-A'>"
+                f"Perfect! We'll give you a call back on {html.escape(readable)}. "
+                f"Thanks so much for your time today — have a wonderful day!"
+                f"</Say>"
+                f"<Hangup/>"
+                f"</Response>"
+            )
+        else:
+            data["status"]      = "declined"
+            data["fail_reason"] = "Candidate declined to schedule a callback"
+            if call_log:
+                call_log[-1]["status"]   = "declined"
+                call_log[-1]["ended_at"] = datetime.now().isoformat()
+            _save_interview(interview_id, data)
+            _sync_candidate_interview(interview_id, data)
+            try:
+                from backend.api.routes.pipeline import _on_pipeline_call_ended
+                _on_pipeline_call_ended(interview_id, "declined")
+            except Exception:
+                pass
+            return _xml(
+                f"<Response>"
+                f"<Say voice='Google.en-IN-Neural2-A'>"
+                f"No problem at all — we appreciate your time. If you change your mind, feel free to reach out to us. Have a wonderful day!"
+                f"</Say>"
+                f"<Hangup/>"
+                f"</Response>"
+            )
+    except Exception as _e:
+        print(f"[TwiML] twilio_callback_time unhandled error for {interview_id}: {_e}")
         return _xml(
-            f"<Response>"
-            f"<Say voice='Google.en-IN-Neural2-A'>"
-            f"Perfect! We'll give you a call back on {html.escape(readable)}. "
-            f"Thanks so much for your time today — have a wonderful day!"
-            f"</Say>"
-            f"<Hangup/>"
-            f"</Response>"
-        )
-    else:
-        data["status"]      = "declined"
-        data["fail_reason"] = "Candidate declined to schedule a callback"
-        if call_log:
-            call_log[-1]["status"]   = "declined"
-            call_log[-1]["ended_at"] = datetime.now().isoformat()
-        _save_interview(interview_id, data)
-        return _xml(
-            f"<Response>"
-            f"<Say voice='Google.en-IN-Neural2-A'>"
-            f"No problem at all — we appreciate your time. If you change your mind, feel free to reach out to us. Have a wonderful day!"
-            f"</Say>"
-            f"<Hangup/>"
-            f"</Response>"
+            "<Response>"
+            "<Say voice='Google.en-IN-Neural2-A'>"
+            "We're having a technical issue. We'll call you back shortly. Goodbye!"
+            "</Say>"
+            "<Hangup/>"
+            "</Response>"
         )
 
 
@@ -732,21 +806,32 @@ async def twilio_answer(
                 # Transcribe first — repeat check must happen before pause hint
                 quick_text = None
                 try:
-                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TE
-                    with ThreadPoolExecutor(max_workers=1) as _pool:
-                        _fut = _pool.submit(transcribe_recording, RecordingUrl + ".mp3", fast=False)
+                    import threading as _th
+                    _result_holder = [None]
+                    def _transcribe_bg():
                         try:
-                            quick_text = _fut.result(timeout=20)
-                            print(f"[Twilio answer] q={q_idx} transcript: {quick_text[:100]!r}")
-                        except _TE:
-                            print(f"[Twilio answer] q={q_idx} transcription timed out")
+                            _result_holder[0] = transcribe_recording(RecordingUrl + ".mp3", fast=False)
+                        except Exception as _te:
+                            print(f"[Twilio answer] transcription error: {_te}")
+                    _t = _th.Thread(target=_transcribe_bg, daemon=True)
+                    _t.start()
+                    _t.join(timeout=12)  # truly returns after 12s — daemon thread finishes in background
+                    quick_text = _result_holder[0]
+                    if quick_text:
+                        print(f"[Twilio answer] q={q_idx} transcript: {quick_text[:100]!r}")
+                    else:
+                        print(f"[Twilio answer] q={q_idx} transcription timed out or failed")
                 except Exception as te:
                     print(f"[Twilio answer] inline transcription failed: {te}")
 
-                is_repeat = bool(quick_text) and any(kw in quick_text.lower() for kw in REPEAT_KEYWORDS)
+                _qt_lower = quick_text.lower() if quick_text else ""
+                is_repeat = bool(quick_text) and any(
+                    re.search(r'(?<!\w)' + re.escape(kw) + r'(?!\w)', _qt_lower)
+                    for kw in REPEAT_KEYWORDS
+                )
 
-                # Claude fallback: catches Whisper hallucinations on short responses
-                if not is_repeat and quick_text and len(quick_text.split()) < 20:
+                # Claude fallback: only for very short responses to avoid false positives
+                if not is_repeat and quick_text and len(quick_text.split()) < 8:
                     is_repeat = _is_repeat_request(quick_text)
 
                 if is_repeat:
@@ -881,4 +966,59 @@ async def twilio_status_callback(interview_id: str, request: Request, background
 
     _save_interview(interview_id, data)
     _sync_candidate_interview(interview_id, data)
+
+    if data["status"] in ("failed", "abandoned"):
+        try:
+            from backend.api.routes.pipeline import _on_pipeline_call_ended
+            _on_pipeline_call_ended(interview_id, "no_answer")
+        except Exception:
+            pass
+
+    return {"status": "ok"}
+
+
+@router.post("/twilio/amd/{interview_id}")
+async def twilio_amd_callback(interview_id: str, request: Request):
+    """Twilio Async AMD callback — fires when answering machine is detected."""
+    form        = await request.form()
+    answered_by = form.get("AnsweredBy", "")
+    call_sid    = form.get("CallSid", "")
+    print(f"[AMD] interview={interview_id} AnsweredBy={answered_by}")
+
+    # Only act on machine detections — "human" means the call continues normally
+    if not answered_by.startswith("machine"):
+        return {"status": "ok"}
+
+    data = _get_interview(interview_id)
+    if not data:
+        return {"status": "ok"}
+
+    # Already in a terminal state (status callback beat us here)
+    if data["status"] in ("processing", "completed", "abandoned", "failed", "callback_scheduled"):
+        return {"status": "ok"}
+
+    # Hang up the live call
+    if call_sid:
+        try:
+            import os as _os
+            from twilio.rest import Client as _Client
+            _tc = _Client(_os.getenv("TWILIO_ACCOUNT_SID"), _os.getenv("TWILIO_AUTH_TOKEN"))
+            _tc.calls(call_sid).update(status="completed")
+        except Exception as e:
+            print(f"[AMD] Failed to hang up call {call_sid}: {e}")
+
+    data["status"]      = "failed"
+    data["fail_reason"] = "Voicemail detected — call not answered by a person"
+    call_log = data.get("call_log", [])
+    if call_log:
+        call_log[-1].update({"status": "failed", "fail_reason": data["fail_reason"]})
+    _save_interview(interview_id, data)
+    _sync_candidate_interview(interview_id, data)
+
+    try:
+        from backend.api.routes.pipeline import _on_pipeline_call_ended
+        _on_pipeline_call_ended(interview_id, "no_answer")
+    except Exception:
+        pass
+
     return {"status": "ok"}

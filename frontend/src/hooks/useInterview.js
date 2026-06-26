@@ -1,14 +1,22 @@
 import { useState, useRef } from 'react'
-import { apiStartInterview, apiRecallInterview, safeJson } from '../api/client'
+import { apiStartInterview, apiRecallInterview, apiInterviewStatus, safeJson } from '../api/client'
+
+const TERMINAL = ['completed', 'abandoned', 'failed', 'declined']
 
 export function useInterview() {
   const [interview,   setInterview]   = useState(null)
   const [callLoading, setCallLoading] = useState(false)
   const [callError,   setCallError]   = useState('')
-  const esRef = useRef(null)
+  const esRef       = useRef(null)
+  const slowPollRef = useRef(null)
+
+  const _stopAll = () => {
+    if (esRef.current)       { esRef.current.close(); esRef.current = null }
+    if (slowPollRef.current) { clearInterval(slowPollRef.current); slowPollRef.current = null }
+  }
 
   const startPolling = (callId) => {
-    if (esRef.current) esRef.current.close()
+    _stopAll()
 
     const es = new EventSource(`/interview/stream/${callId}`)
     esRef.current = es
@@ -16,11 +24,27 @@ export function useInterview() {
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-        if (data.status === 'not_found') { es.close(); esRef.current = null; return }
+        if (data.status === 'not_found') { _stopAll(); return }
         setInterview(data)
-        if (['completed', 'abandoned', 'failed', 'callback_scheduled', 'declined'].includes(data.status)) {
-          es.close()
-          esRef.current = null
+
+        if (TERMINAL.includes(data.status)) {
+          _stopAll()
+        } else if (data.status === 'callback_scheduled') {
+          // Close SSE — callback will fire later; switch to slow poll to detect when it does
+          es.close(); esRef.current = null
+          slowPollRef.current = setInterval(async () => {
+            try {
+              const r = await apiInterviewStatus(callId)
+              const d = await safeJson(r)
+              if (!d.status || d.status === 'callback_scheduled') return
+              // Status changed — callback fired
+              clearInterval(slowPollRef.current); slowPollRef.current = null
+              setInterview(d)
+              if (!TERMINAL.includes(d.status)) {
+                startPolling(callId) // reconnect SSE for the new call attempt
+              }
+            } catch (_) {}
+          }, 10_000)
         }
       } catch (_) {}
     }
@@ -52,7 +76,7 @@ export function useInterview() {
     apiRecallInterview(interviewId)
 
   const clearInterview = () => {
-    if (esRef.current) { esRef.current.close(); esRef.current = null }
+    _stopAll()
     setInterview(null)
     setCallError('')
   }

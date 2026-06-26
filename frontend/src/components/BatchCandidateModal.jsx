@@ -106,9 +106,12 @@ export default function BatchCandidateModal({ candidate, onClose, onCallCandidat
                 </div>
               )}
 
+              <InterviewPanel interview={interview} canEdit={canEdit} />
+
               {onCallCandidate && candidate.phone &&
-               candidate.filter_status !== 'no_phone' && (
-                <div style={{ marginBottom: 16 }}>
+               candidate.filter_status !== 'no_phone' &&
+               !['calling', 'in_progress', 'processing', 'completed'].includes(candidate.interview_status) && (
+                <div style={{ marginTop: 16 }}>
                   <button
                     className="btn-analyze"
                     style={{ fontSize: '0.85rem', padding: '9px 20px' }}
@@ -118,8 +121,6 @@ export default function BatchCandidateModal({ candidate, onClose, onCallCandidat
                   </button>
                 </div>
               )}
-
-              <InterviewPanel interview={interview} canEdit={canEdit} />
             </section>
           ) : (
             <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-3)' }}>

@@ -42,6 +42,9 @@ export const apiCallbacksDue = () =>
 export const apiGetOpenings = () =>
   fetch('/openings')
 
+export const apiGetOpeningsFull = () =>
+  fetch('/openings/full')
+
 export const apiCreateOpening = (opening) =>
   fetch('/openings', {
     method:  'POST',
@@ -58,3 +61,21 @@ export const apiUpdateOpening = (id, data) =>
 
 export const apiDeleteOpening = (id) =>
   fetch(`/openings/${id}`, { method: 'DELETE' })
+
+export const apiGetOpeningCandidates = (id) =>
+  fetch(`/openings/${id}/candidates`)
+
+export const apiForceResolve = (interviewId) =>
+  fetch(`/interview/force-resolve/${interviewId}`, { method: 'POST' })
+
+export const apiActiveCalls = () =>
+  fetch('/calls/active')
+
+export const apiStartPipeline = (openingId) =>
+  fetch(`/openings/${openingId}/pipeline/start`, { method: 'POST' })
+
+export const apiPipelineStatus = (openingId) =>
+  fetch(`/openings/${openingId}/pipeline/status`)
+
+export const apiStopPipeline = (openingId) =>
+  fetch(`/openings/${openingId}/pipeline/stop`, { method: 'POST' })

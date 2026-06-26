@@ -141,6 +141,27 @@ def _init_db():
             conn.execute(_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT"))
             conn.execute(_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
             conn.execute(_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS temp_expires_at TIMESTAMPTZ"))
+            conn.execute(_sql("""
+                CREATE TABLE IF NOT EXISTS pipelines (
+                    id         TEXT        PRIMARY KEY,
+                    opening_id TEXT        NOT NULL REFERENCES job_openings(id) ON DELETE CASCADE,
+                    status     TEXT        NOT NULL DEFAULT 'running',
+                    queue      JSONB       NOT NULL DEFAULT '[]',
+                    active     JSONB       NOT NULL DEFAULT '{}',
+                    completed  JSONB       NOT NULL DEFAULT '[]',
+                    skipped    JSONB       NOT NULL DEFAULT '[]',
+                    total      INT         NOT NULL DEFAULT 0,
+                    jd_text    TEXT,
+                    job_title  TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+            conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_pipelines_opening ON pipelines(opening_id)"))
+            conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_pipelines_status  ON pipelines(status)"))
+            # Migration: add jd_text/job_title for existing rows
+            conn.execute(_sql("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS jd_text TEXT"))
+            conn.execute(_sql("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS job_title TEXT"))
             conn.commit()
         print("[DB] PostgreSQL connected — tables ready")
     except Exception as e:
@@ -642,6 +663,175 @@ def _load_interview(interview_id: str) -> dict | None:
     except Exception as e:
         print(f"[DB] _load_interview failed for {interview_id}: {e}")
         return None
+
+
+def _save_pipeline(pipeline_id: str, data: dict):
+    if not _db_engine:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                INSERT INTO pipelines (id, opening_id, status, queue, active, completed, skipped, total, jd_text, job_title, updated_at)
+                VALUES (:id, :opening_id, :status, CAST(:queue AS jsonb), CAST(:active AS jsonb),
+                        CAST(:completed AS jsonb), CAST(:skipped AS jsonb), :total, :jd_text, :job_title, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    status     = EXCLUDED.status,
+                    queue      = EXCLUDED.queue,
+                    active     = EXCLUDED.active,
+                    completed  = EXCLUDED.completed,
+                    skipped    = EXCLUDED.skipped,
+                    total      = EXCLUDED.total,
+                    jd_text    = EXCLUDED.jd_text,
+                    job_title  = EXCLUDED.job_title,
+                    updated_at = NOW()
+            """), {
+                "id":         pipeline_id,
+                "opening_id": data.get("opening_id"),
+                "status":     data.get("status", "running"),
+                "queue":      json.dumps(data.get("queue", [])),
+                "active":     json.dumps(data.get("active", {})),
+                "completed":  json.dumps(data.get("completed", [])),
+                "skipped":    json.dumps(data.get("skipped", [])),
+                "total":      data.get("total", 0),
+                "jd_text":    data.get("jd_text"),
+                "job_title":  data.get("job_title"),
+            })
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _save_pipeline failed for {pipeline_id}: {e}")
+
+
+def _load_pipelines() -> dict:
+    if not _db_engine:
+        return {}
+    try:
+        with _db_engine.connect() as conn:
+            rows = conn.execute(_sql(
+                "SELECT * FROM pipelines WHERE status = 'running' ORDER BY created_at"
+            )).mappings().all()
+            result = {}
+            for row in rows:
+                pid = row["id"]
+                result[pid] = {
+                    "pipeline_id":   pid,
+                    "opening_id":    row["opening_id"],
+                    "status":        row["status"],
+                    "queue":         list(row["queue"] or []),
+                    "active":        dict(row["active"] or {}),
+                    "completed":     list(row["completed"] or []),
+                    "skipped":       list(row["skipped"] or []),
+                    "total":         row["total"],
+                    "max_concurrent": 3,
+                    "jd_text":       row.get("jd_text"),
+                    "job_title":     row.get("job_title"),
+                }
+            return result
+    except Exception as e:
+        print(f"[DB] _load_pipelines failed: {e}")
+        return {}
+
+
+def _delete_interview(interview_id: str):
+    if not _db_engine:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("DELETE FROM interviews WHERE id = :id"), {"id": interview_id})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _delete_interview failed for {interview_id}: {e}")
+
+
+def _get_interview_status_from_db(interview_id: str):
+    if not _db_engine:
+        return None
+    try:
+        with _db_engine.connect() as conn:
+            row = conn.execute(
+                _sql("SELECT status FROM interviews WHERE id = :id"), {"id": interview_id}
+            ).fetchone()
+            return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] _get_interview_status_from_db failed for {interview_id}: {e}")
+        return None
+
+
+def _get_qualified_candidates_for_opening(opening_id: str) -> list:
+    if not _db_engine:
+        return []
+    try:
+        with _db_engine.connect() as conn:
+            rows = conn.execute(_sql("""
+                SELECT bc.id, bc.batch_id, bc.single_id, bc.file_name, bc.name, bc.phone,
+                       bc.resume_text, bc.resume_score, bc.interview_status,
+                       COALESCE(b.jd_text, jo.jd_text)  AS jd_text,
+                       COALESCE(b.job_title, jo.title)   AS job_title
+                FROM batch_candidates bc
+                LEFT JOIN batches b      ON bc.batch_id = b.id
+                LEFT JOIN job_openings jo ON jo.id = :oid
+                WHERE (b.opening_id = :oid OR bc.opening_id = :oid)
+                  AND bc.filter_status     = 'qualified'
+                  AND bc.phone             IS NOT NULL
+                  AND bc.interview_status  NOT IN ('completed', 'processing', 'calling', 'callback_scheduled', 'declined')
+                ORDER BY bc.resume_score DESC NULLS LAST
+            """), {"oid": opening_id}).mappings().all()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[DB] _get_qualified_candidates_for_opening failed: {e}")
+        return []
+
+
+def _link_batch_candidate_interview(batch_id: str, file_name: str, interview_id: str):
+    if not _db_engine:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                UPDATE batch_candidates SET
+                    interview_id     = :iid,
+                    interview_status = 'calling',
+                    updated_at       = NOW()
+                WHERE batch_id = :bid AND file_name = :fn
+            """), {"bid": batch_id, "fn": file_name, "iid": interview_id})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _link_batch_candidate_interview failed: {e}")
+
+
+def _link_candidate_interview_by_bcid(bc_id: int, interview_id: str):
+    """Link by batch_candidates.id primary key — works regardless of batch_id/single_id."""
+    if not _db_engine or not bc_id:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                UPDATE batch_candidates SET
+                    interview_id     = :iid,
+                    interview_status = 'calling',
+                    updated_at       = NOW()
+                WHERE id = :bcid
+            """), {"bcid": bc_id, "iid": interview_id})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _link_candidate_interview_by_bcid failed: {e}")
+
+
+def _reset_candidate_on_call_failure(bc_id: int, interview_id: str):
+    """Reset batch_candidates after _start_candidate_call fails — clears stale 'calling' state."""
+    if not _db_engine or not bc_id:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                UPDATE batch_candidates
+                SET interview_id     = NULL,
+                    interview_status = NULL,
+                    updated_at       = NOW()
+                WHERE id = :bcid AND interview_id = :iid
+            """), {"bcid": bc_id, "iid": interview_id})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _reset_candidate_on_call_failure failed: {e}")
 
 
 def load_stores() -> tuple[dict, dict, dict]:
