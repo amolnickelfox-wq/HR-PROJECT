@@ -10,16 +10,18 @@ from fastapi.responses import Response as _Response
 
 from backend.app.state import _scheduler, _SCHEDULER_OK
 from backend.app.database import _init_db, load_stores, _load_pipelines, _save_pipeline, _get_interview_status_from_db, _save_interview, _sync_candidate_interview
-from backend.app.state import interview_store, batch_store, opening_store, pipeline_store, opening_pipeline
+from backend.app.state import interview_store, batch_store, opening_store, pipeline_store, opening_pipeline, settings_store
 from backend.app.callbacks import _reschedule_pending_callbacks
 
 from backend.api.routes.health    import router as health_router
 from backend.api.routes.resume    import router as resume_router
 from backend.api.routes.interview import router as interview_router
+from backend.api.routes.plivo     import router as plivo_router
 from backend.api.routes.batch     import router as batch_router
 from backend.api.routes.openings  import router as openings_router
 from backend.api.routes.auth      import router as auth_router
 from backend.api.routes.pipeline  import router as pipeline_router
+from backend.api.routes.settings  import router as settings_router
 
 
 def _cleanup_stuck_calls():
@@ -59,7 +61,26 @@ async def lifespan(_app: FastAPI):
     if _SCHEDULER_OK:
         _scheduler.start()
         print("[Startup] APScheduler started — callback scheduling enabled")
+        from backend.services.recording_cleanup import cleanup_old_recordings
+        _scheduler.add_job(
+            cleanup_old_recordings,
+            'interval',
+            hours=24,
+            id='recording_cleanup_daily',
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        print("[Startup] Recording cleanup scheduled — runs daily")
     _init_db()
+    from backend.app.database import _get_setting
+    env_default = settings_store.get("call_provider")
+    persisted_provider = _get_setting("call_provider")
+    print(f"[Startup] env/current call_provider='{env_default}', DB-persisted call_provider={persisted_provider!r}")
+    if persisted_provider in ("twilio", "plivo"):
+        settings_store["call_provider"] = persisted_provider
+        print(f"[Startup] Restored call_provider='{persisted_provider}' from DB")
+    else:
+        print(f"[Startup] No valid persisted call_provider found — keeping '{env_default}'")
     from backend.app.database import _seed_super_admin
     sa_user = os.getenv("SUPER_ADMIN_USERNAME", "director")
     sa_pass = os.getenv("SUPER_ADMIN_PASSWORD", "changeme")
@@ -88,6 +109,9 @@ async def lifespan(_app: FastAPI):
             elif status == "callback_scheduled":
                 p["skipped"].append({**candidate, "skip_reason": "callback"})
             elif status in ("calling", "in_progress", "processing"):
+                # Re-fetch the interview for THIS iid — do not reuse the loop-variable
+                # left over from the scan loop above (that held the last active entry)
+                iv = interview_store.get(iid)
                 # Mark old interview failed so batch_candidates.interview_status is cleared
                 # immediately — prevents permanent 'calling' if the next call also fails
                 if iv:
@@ -177,28 +201,51 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="AI Recruitment Assistant", version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-_TWILIO_ERROR_XML = (
-    '<?xml version="1.0" encoding="UTF-8"?>'
-    '<Response>'
-    '<Say voice="Google.en-IN-Neural2-A">'
-    "We're having a technical issue. We'll call you back shortly. Goodbye!"
-    '</Say>'
-    '<Hangup/>'
-    '</Response>'
-)
+def _get_error_xml(is_plivo: bool) -> str:
+    if is_plivo:
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Response>'
+            '<Speak voice="Polly.Kajal">'
+            "We're having a technical issue. We'll call you back shortly. Goodbye!"
+            '</Speak>'
+            '<Hangup/>'
+            '</Response>'
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Response>'
+        '<Say voice="Google.en-IN-Neural2-A">'
+        "We're having a technical issue. We'll call you back shortly. Goodbye!"
+        '</Say>'
+        '<Hangup/>'
+        '</Response>'
+    )
 
 @app.exception_handler(Exception)
 async def twilio_fallback_handler(request: Request, exc: Exception):
-    """Return graceful TwiML on any unhandled exception in Twilio webhook routes."""
-    if "/twilio/" in str(request.url.path):
-        print(f"[TwiML] Unhandled error on {request.url.path}: {exc}")
-        return _Response(content=_TWILIO_ERROR_XML, media_type="text/xml", status_code=200)
+    """Return graceful TwiML/Plivo-XML on any unhandled exception in the Twilio or Plivo webhook routes."""
+    path = str(request.url.path)
+    if "/twilio/" in path or "/plivo/" in path:
+        print(f"[TwiML] Unhandled error on {path}: {exc}")
+        return _Response(content=_get_error_xml(is_plivo="/plivo/" in path), media_type="text/xml", status_code=200)
     raise exc
 
+from fastapi import Depends
+from backend.api.routes.auth import _require_auth
+
+# Routers that mix public webhooks with app routes, or self-guard, are wired without a
+# blanket dependency: auth_router (self-guards), health, interview_router (/twilio/* is public),
+# plivo_router (/plivo/* is public), settings_router (self-guards super_admin).
 app.include_router(auth_router)
 app.include_router(health_router)
-app.include_router(resume_router)
 app.include_router(interview_router)
-app.include_router(batch_router)
-app.include_router(openings_router)
-app.include_router(pipeline_router)
+app.include_router(plivo_router)
+app.include_router(settings_router)
+
+# Data/action routers — require a valid JWT on every route.
+_auth_dep = [Depends(_require_auth)]
+app.include_router(resume_router,   dependencies=_auth_dep)
+app.include_router(batch_router,    dependencies=_auth_dep)
+app.include_router(openings_router, dependencies=_auth_dep)
+app.include_router(pipeline_router, dependencies=_auth_dep)

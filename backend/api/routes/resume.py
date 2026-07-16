@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from backend.services.analyzer import analyze, parse_resume
 from backend.utils.file_utils import extract_text
 from backend.app.database import _save_single_candidate
+from backend.app.state import opening_store
 
 router = APIRouter()
 
@@ -23,7 +24,12 @@ class ParseRequest(BaseModel):
 async def analyze_resume(req: AnalyzeRequest):
     if not req.resume_text.strip(): raise HTTPException(400, "Resume text is required.")
     if not req.jd_text.strip():     raise HTTPException(400, "Job description is required.")
-    result = analyze(req.resume_text, req.jd_text)
+    jd_fields = None
+    if req.opening_id:
+        opening = opening_store.get(req.opening_id)
+        if opening:
+            jd_fields = opening.get('jd_fields') or None
+    result = analyze(req.resume_text, req.jd_text, jd_fields=jd_fields)
     if req.single_id:
         _save_single_candidate(req.single_id, req.opening_id, req.resume_text, result)
     return result

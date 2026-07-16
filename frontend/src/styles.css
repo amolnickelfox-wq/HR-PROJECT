@@ -274,6 +274,12 @@ textarea { font-family: var(--font); }
 }
 @media (max-width: 860px) { .input-grid { grid-template-columns: 1fr; } }
 
+.jd-builder-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 24px; align-items: start;
+}
+@media (max-width: 860px) { .jd-builder-grid { grid-template-columns: 1fr; } }
+
 .input-card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -2400,6 +2406,110 @@ kbd {
   gap: 6px;
 }
 .opening-btn--pipeline:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+/* ── Opening card: title row + top-right icon buttons ── */
+.opening-card-title-row   { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.opening-card-icon-wrap   { width: 32px; height: 32px; border-radius: 8px; background: var(--primary-dim); color: var(--primary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.opening-card-actions-top { display: flex; gap: 6px; flex-shrink: 0; }
+.opening-icon-btn {
+  width: 28px; height: 28px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-3);
+  transition: color .15s, background .15s, border-color .15s;
+}
+.opening-icon-btn:hover         { color: var(--text); background: var(--bg-2); border-color: var(--border-mid); }
+.opening-icon-btn--edit:hover   { color: var(--primary); border-color: var(--primary); background: var(--primary-dim); }
+.opening-icon-btn--delete:hover { color: var(--red); border-color: var(--red-border); background: var(--red-dim); }
+
+/* ── Opening card: stat cells ── */
+.opening-stat { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.opening-stat-icon { width: 26px; height: 26px; border-radius: 7px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-bottom: 1px; }
+.opening-stat-icon--blue   { background: var(--primary-dim); color: var(--primary); }
+.opening-stat-icon--green  { background: var(--green-dim);   color: var(--green); }
+.opening-stat-icon--violet { background: var(--violet-dim);  color: var(--violet); }
+.opening-stat-divider      { width: 1px; background: var(--border); align-self: stretch; }
+.opening-stat-value--green  { color: var(--green); }
+.opening-stat-value--violet { color: var(--violet); }
+
+/* ── Opening card: footer area + buttons ── */
+.opening-no-jd-warn {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 0.73rem; color: var(--yellow);
+  background: var(--yellow-dim); border: 1px solid var(--yellow-border);
+  border-radius: 6px; padding: 5px 10px;
+}
+.opening-card-footer { display: flex; flex-direction: column; }
+.opening-btn--results { display: flex; align-items: center; justify-content: center; gap: 7px; }
+.opening-btn--add {
+  width: 100%; background: var(--primary-dim); color: var(--primary);
+  border-color: transparent;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  margin-top: 2px;
+}
+.opening-btn--add:hover { background: var(--primary); color: #fff; }
+.opening-btn--jd {
+  width: 100%; color: #0891b2; border-color: #a5f3fc; background: #ecfeff;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  font-size: 0.78rem;
+}
+.opening-btn--jd:hover { background: #0891b2; color: #fff; border-color: #0891b2; }
+
+/* ── Generic modal overlay + box ── */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px 16px;
+}
+.modal-box {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: 24px;
+  box-shadow: var(--shadow-modal);
+  animation: modal-in 0.2s ease;
+}
+
+/* ── "Add Candidates" modal ── */
+.add-cand-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px 16px;
+}
+.add-cand-modal {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--r-xl); width: 100%; max-width: 480px;
+  box-shadow: var(--shadow-modal); animation: modal-in 0.2s ease; overflow: hidden;
+}
+.add-cand-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--bg);
+}
+.add-cand-title  { display: flex; align-items: center; gap: 7px; font-size: 0.9rem; font-weight: 700; color: var(--text); flex: 1; }
+.add-cand-job    { font-size: 0.75rem; color: var(--primary); background: var(--primary-dim); border-radius: 5px; padding: 3px 8px; font-weight: 600; white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.add-cand-close  { width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-3); transition: color .15s, background .15s; }
+.add-cand-close:hover { color: var(--text); background: var(--bg-2); }
+.add-cand-body   { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.add-cand-option {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--card); cursor: pointer; text-align: left; width: 100%;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.add-cand-option:hover { border-color: var(--primary); background: var(--primary-dim); box-shadow: 0 2px 8px rgba(79,70,229,.08); }
+.add-cand-option-icon         { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.add-cand-option-icon--single { background: var(--primary-dim); color: var(--primary); }
+.add-cand-option-icon--batch  { background: var(--violet-dim); color: var(--violet); }
+.add-cand-option-text         { flex: 1; min-width: 0; }
+.add-cand-option-title        { font-size: 0.9rem; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.add-cand-option-desc         { font-size: 0.76rem; color: var(--text-2); }
+.add-cand-option-arrow        { color: var(--text-3); flex-shrink: 0; transition: color .15s, transform .15s; }
+.add-cand-option:hover .add-cand-option-arrow { color: var(--primary); transform: translateX(3px); }
+
 .pipeline-status-bar {
   display: flex;
   align-items: center;

@@ -13,7 +13,11 @@ from backend.app.database import (
 
 router = APIRouter()
 
-JWT_SECRET    = os.getenv("JWT_SECRET", "changeme-set-in-env")
+JWT_SECRET    = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    # Fail loud rather than signing tokens with a publicly-known constant, which would
+    # let anyone forge a super_admin JWT. Set JWT_SECRET in .env.
+    raise RuntimeError("JWT_SECRET is not set — refusing to start with an insecure default. Set it in .env.")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_H  = 8
 
@@ -157,12 +161,14 @@ async def reset_password(username: str, req: ResetPasswordRequest, session: dict
         raise HTTPException(503, "Database unavailable")
     try:
         with _db_engine.connect() as conn:
-            conn.execute(_text(
+            result = conn.execute(_text(
                 "UPDATE users SET password_hash = :ph, must_change_password = TRUE WHERE username = :u"
             ), {"ph": _hash_password(req.new_password), "u": username})
             conn.commit()
     except Exception as e:
         raise HTTPException(500, f"Failed to reset password: {e}")
+    if result.rowcount == 0:
+        raise HTTPException(404, f"User '{username}' not found")
     return {"status": "updated"}
 
 

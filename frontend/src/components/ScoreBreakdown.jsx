@@ -8,7 +8,7 @@ const LABELS = {
 }
 
 function BreakdownCard({ label, icon, score, max, weight, animate }) {
-  const pct = Math.round((score / max) * 100)
+  const pct = max > 0 ? Math.round((score / max) * 100) : 0
   return (
     <div className="breakdown-card">
       <div className="bd-icon-wrap">{icon}</div>
@@ -34,16 +34,17 @@ export default function ScoreBreakdown({ breakdown }) {
     <div style={{ marginBottom: 16 }}>
       <div className="section-label">Score Breakdown</div>
       <div className="breakdown-grid">
-        {Object.entries(breakdown).map(([key, val]) => {
+        {Object.entries(breakdown || {}).map(([key, val]) => {
+          if (!val || typeof val !== 'object') return null
           const meta = LABELS[key] || { label: key, icon: '📊' }
           return (
             <BreakdownCard
               key={key}
               label={meta.label}
               icon={meta.icon}
-              score={val.score}
-              max={val.max}
-              weight={val.weight}
+              score={val.score ?? 0}
+              max={val.max ?? 0}
+              weight={val.weight ?? ''}
               animate={animate}
             />
           )

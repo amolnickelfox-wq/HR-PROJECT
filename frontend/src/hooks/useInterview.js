@@ -49,7 +49,23 @@ export function useInterview() {
       } catch (_) {}
     }
 
-    es.onerror = () => { es.close(); esRef.current = null }
+    es.onerror = () => {
+      // SSE dropped (transient network blip). Don't just tear down and freeze the UI —
+      // fall back to slow status polling so the panel keeps updating and recovers.
+      es.close(); esRef.current = null
+      if (slowPollRef.current) return  // a slow poll is already running
+      slowPollRef.current = setInterval(async () => {
+        try {
+          const r = await apiInterviewStatus(callId)
+          const d = await safeJson(r)
+          if (!d.status || d.status === 'not_found') return
+          setInterview(d)
+          if (TERMINAL.includes(d.status)) {
+            clearInterval(slowPollRef.current); slowPollRef.current = null
+          }
+        } catch (_) {}
+      }, 5_000)
+    }
   }
 
   const handleStartInterview = async (payload) => {

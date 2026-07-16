@@ -8,10 +8,32 @@ import re
 import json
 import httpx
 import anthropic as _anthropic
+from twilio.rest import Client as _TwilioClient
 
 _claude_key   = os.getenv("CLAUDE_API_KEY")
 claude_client = _anthropic.Anthropic(api_key=_claude_key, timeout=60.0) if _claude_key else None
 CLAUDE_MODEL  = "claude-haiku-4-5-20251001"
+
+# ── Twilio client (module-level) ──────────────────────────────────────────────
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE       = os.getenv("TWILIO_PHONE_NUMBER")
+twilio_client = _TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID else None
+
+# ── Plivo client (module-level) ───────────────────────────────────────────────
+try:
+    import plivo as _plivo
+    PLIVO_AUTH_ID    = os.getenv("PLIVO_AUTH_ID")
+    PLIVO_AUTH_TOKEN = os.getenv("PLIVO_AUTH_TOKEN")
+    PLIVO_PHONE      = os.getenv("PLIVO_PHONE_NUMBER")
+    plivo_client = _plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN) if PLIVO_AUTH_ID else None
+except ImportError:
+    _plivo = None
+    PLIVO_AUTH_ID = PLIVO_AUTH_TOKEN = PLIVO_PHONE = None
+    plivo_client = None
+    print("[Startup] plivo not installed — Plivo calls disabled. Run: pip install plivo")
+
+from backend.app.state import settings_store
 
 
 def _claude(system: str, prompt: str) -> str:
@@ -30,89 +52,6 @@ def _strip_json(raw: str) -> str:
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw.rstrip())
     return raw.strip()
-
-
-def get_next_question(resume_text: str, jd_text: str, conversation: list[dict], candidate_name: str = None) -> dict:
-    name = candidate_name or "there"
-    interviewer_turns = [m for m in conversation if m["role"] == "interviewer"]
-    n = len(interviewer_turns)
-
-    if n == 0:
-        greeting = (
-            f"Hi {name}! This is Sarah from the team at NickelFox Technologies — so glad you could make some time today! "
-            f"I'd love to start by hearing a bit about you. Could you walk me through your background and what you've been up to recently?"
-        )
-        return {"next_question": greeting, "is_done": False}
-
-    if n >= 6:
-        closing = (
-            f"That's all the questions I had for today — honestly, it was such a pleasure speaking with you, {name}! "
-            "Our team will review everything and we'll be in touch very soon. "
-            "Wishing you a fantastic rest of your day — take care!"
-        )
-        return {"next_question": closing, "is_done": True}
-
-    if not claude_client:
-        fallbacks = [
-            "That's really interesting — what specifically draws you to this particular role?",
-            "I'd love to hear about a challenge you faced at work and how you handled it.",
-            "How do you usually go about building relationships when you join a new team?",
-            "What kind of environment or work style really brings out the best in you?",
-        ]
-        return {"next_question": fallbacks[min(n - 1, len(fallbacks) - 1)], "is_done": False}
-
-    conv_text = "\n".join(
-        f"{'Interviewer' if m['role'] == 'interviewer' else 'Candidate'}: {m['content']}"
-        for m in conversation
-    )
-
-    prompt = f"""You are Sarah, a warm and professional HR recruiter on a phone screening call.
-This is turn {n + 1} of a planned 7-turn HR screening interview.
-
-Your goal: assess the candidate's communication clarity, confidence, motivation, and cultural fit.
-Do NOT ask deep technical questions.
-
-Candidate resume (brief):
-{resume_text[:600]}
-
-Job description (brief):
-{jd_text[:400]}
-
-Conversation so far:
-{conv_text}
-
-Instructions:
-- Write your next spoken line as the interviewer — one short, natural question or acknowledgement + question.
-- Build directly on what the candidate just said.
-- Keep it warm and conversational (1-2 sentences max).
-- Return ONLY your spoken words. No labels, no JSON, no quotation marks."""
-
-    raw = _claude(
-        "You are Sarah, a warm and empathetic HR interviewer at NickelFox Technologies. Respond only with your next spoken line — conversational, encouraging, and human. No labels or formatting.",
-        prompt,
-    )
-    return {"next_question": raw.strip(), "is_done": False}
-
-
-def score_conversation(conversation: list[dict], jd_text: str) -> dict:
-    if not conversation:
-        return {
-            "interview_score":    "N/A",
-            "communication":      {"score": 0, "max": 35},
-            "confidence":         {"score": 0, "max": 30},
-            "motivation_fit":     {"score": 0, "max": 20},
-            "behavioral_quality": {"score": 0, "max": 15},
-            "verdict":            "No Data",
-            "strengths":          [],
-            "improvements":       [],
-            "summary":            "No conversation data.",
-        }
-    transcript = "\n\n".join(
-        f"{'Interviewer' if m['role'] == 'interviewer' else 'Candidate'}: {m['content']}"
-        for m in conversation
-    )
-    questions = [m["content"] for m in conversation if m["role"] == "interviewer"]
-    return score_interview(transcript, questions, jd_text)
 
 
 def generate_questions(resume_text: str, jd_text: str) -> list[str]:
@@ -176,14 +115,8 @@ JOB DESCRIPTION:
     return json.loads(_strip_json(raw))
 
 
-def start_twilio_call(phone_number: str, interview_id: str) -> dict:
-    from twilio.rest import Client
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token  = os.getenv("TWILIO_AUTH_TOKEN")
-    from_number = os.getenv("TWILIO_PHONE_NUMBER")
-    base_url    = os.getenv("BASE_URL", "").rstrip("/")
-
-    if not account_sid or not auth_token or not from_number:
+def _start_twilio_call(phone_number: str, interview_id: str) -> dict:
+    if not twilio_client or not TWILIO_PHONE:
         raise Exception("Twilio credentials missing — set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER in .env")
 
     digits = re.sub(r"\D", "", phone_number)
@@ -194,11 +127,11 @@ def start_twilio_call(phone_number: str, interview_id: str) -> dict:
     else:
         to = f"+{digits}"
 
+    base_url = os.getenv("BASE_URL", "").rstrip("/")
     print(f"[Twilio] Calling {to}, interview_id={interview_id}")
-    client = Client(account_sid, auth_token)
-    call = client.calls.create(
+    call = twilio_client.calls.create(
         to=to,
-        from_=from_number,
+        from_=TWILIO_PHONE,
         url=f"{base_url}/twilio/start/{interview_id}",
         status_callback=f"{base_url}/twilio/status/{interview_id}",
         status_callback_event=["initiated", "ringing", "answered", "completed"],
@@ -213,12 +146,75 @@ def start_twilio_call(phone_number: str, interview_id: str) -> dict:
     return {"call_sid": call.sid}
 
 
+def _start_plivo_call(phone_number: str, interview_id: str) -> dict:
+    if not plivo_client or not PLIVO_PHONE:
+        raise Exception("Plivo credentials missing — set PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN, PLIVO_PHONE_NUMBER in .env")
+
+    digits = re.sub(r"\D", "", phone_number)
+    if len(digits) == 10:
+        to = f"+91{digits}"
+    elif digits.startswith("91") and len(digits) == 12:
+        to = f"+{digits}"
+    else:
+        to = f"+{digits}"
+
+    base_url = os.getenv("BASE_URL", "").rstrip("/")
+    print(f"[Plivo] Calling {to}, interview_id={interview_id}")
+    response = plivo_client.calls.create(
+        from_=PLIVO_PHONE,
+        to_=to,
+        answer_url=f"{base_url}/plivo/start/{interview_id}",
+        hangup_url=f"{base_url}/plivo/status/{interview_id}",
+        ring_timeout=20,
+        # Observe-only for now — Plivo's AMD false-positived on real pickups previously,
+        # so /plivo/amd logs the signal but never acts on it.
+        machine_detection="true",
+        machine_detection_time=10000,
+        machine_detection_url=f"{base_url}/plivo/amd/{interview_id}",
+    )
+    print(f"[Plivo] Call initiated — UUID={response.request_uuid}")
+    return {"call_sid": response.request_uuid}
+
+
+def start_twilio_call(phone_number: str, interview_id: str) -> dict:
+    provider = settings_store.get("call_provider", "twilio")
+    if provider == "plivo":
+        if not plivo_client:
+            raise Exception("Plivo credentials not configured — set PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN, PLIVO_PHONE_NUMBER in .env")
+        return _start_plivo_call(phone_number, interview_id)
+    return _start_twilio_call(phone_number, interview_id)
+
+
+# Exported so callers (the inline answer-loop transcription in interview.py/plivo.py) can
+# recognize this exact marker and avoid caching it as final — see comment at those call sites.
+HALLUCINATION_MARKER = "[unclear response — possible transcription error]"
+
+
 def transcribe_recording(recording_url: str, *, fast: bool = False) -> str:
     groq_key = os.getenv("GROQ_API_KEY")
     if not groq_key:
         return "[transcription skipped — no GROQ_API_KEY set]"
 
-    auth  = (os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+    # Detect provider from the recording URL itself, NOT the global call_provider setting —
+    # otherwise toggling the provider (or a callback re-dial on the other provider) between
+    # when a recording is made and when it's transcribed would fetch with the wrong auth.
+    if "plivo" in recording_url:
+        auth = (PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
+        url  = recording_url
+    elif "twilio" in recording_url:
+        auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        # Twilio requires .mp3 extension; ensure it's present without double-appending
+        url  = recording_url if recording_url.endswith(".mp3") else recording_url + ".mp3"
+    else:
+        # Unknown host — fall back to the active provider's credentials
+        provider = settings_store.get("call_provider", "twilio")
+        if provider == "plivo":
+            auth = (PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
+            url  = recording_url
+        else:
+            auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            url  = recording_url if recording_url.endswith(".mp3") else recording_url + ".mp3"
+
     model = "whisper-large-v3-turbo" if fast else "whisper-large-v3"
 
     import time as _time
@@ -227,7 +223,7 @@ def transcribe_recording(recording_url: str, *, fast: bool = False) -> str:
     for attempt in range(3):
         try:
             audio_resp = httpx.get(
-                recording_url, auth=auth, follow_redirects=True, timeout=30
+                url, auth=auth, follow_redirects=True, timeout=30
             )
             if audio_resp.status_code == 404 and attempt < 2:
                 print(f"[Transcribe] recording not ready (attempt {attempt+1}/3) — retrying")
@@ -251,9 +247,54 @@ def transcribe_recording(recording_url: str, *, fast: bool = False) -> str:
         model=model,
         language="hi",
         temperature=0,
-        prompt="Interviewer: Tell me about your experience. Candidate:",
+        # No prompt: Whisper treats the prompt as prior context and, on silence/noisy/
+        # ambiguous audio, hallucinates fluent-but-fabricated continuations of it. A prompt
+        # ending mid-sentence (e.g. dialogue cut off at "Candidate:") previously caused
+        # exactly that — the model "continuing" the dangling cue instead of transcribing.
     )
-    return result.text.strip()
+    text = result.text.strip()
+    if _is_hallucinated_transcript(text):
+        print(f"[Transcribe] discarded likely-hallucinated output: {text[:120]!r}")
+        return HALLUCINATION_MARKER
+    return text
+
+
+# Known Whisper hallucination signatures — Whisper was trained on YouTube subtitles, so
+# silent/noisy audio segments often get filled with fluent-sounding but fabricated text
+# echoing that training data (or, previously, our own prompt). Conservative on purpose:
+# only trips on specific, well-documented patterns, not just "looks unusual."
+_HALLUCINATION_PHRASES = [
+    "thank you for watching", "thanks for watching", "subscribe to",
+    "like and subscribe", "see you in the next video", "captions by", "subtitles by",
+]
+_CANDIDATE_ECHO_RE = re.compile(r"\bcandidate\s*(\d+(\.\d+)?|[a-z]\.)", re.IGNORECASE)
+
+
+def _is_hallucinated_transcript(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    if any(phrase in lower for phrase in _HALLUCINATION_PHRASES):
+        return True
+    word_count = len(text.split())
+    candidate_hits = len(_CANDIDATE_ECHO_RE.findall(text))
+    if candidate_hits >= 2:
+        return True
+    # A single hit is only suspicious in a short response — a candidate legitimately
+    # saying "candidate" once in a long, otherwise-coherent answer shouldn't be discarded.
+    if candidate_hits >= 1 and word_count <= 12:
+        return True
+    # Degenerate repetition: the same short (2-4 word) phrase repeated 3+ times in a row
+    # is a common Whisper "looping" signature on silence/noise, regardless of wording.
+    words = lower.split()
+    for n in (2, 3, 4):
+        if len(words) < n * 3:
+            continue
+        for i in range(len(words) - n * 3 + 1):
+            chunk = words[i:i + n]
+            if chunk == words[i + n:i + 2 * n] == words[i + 2 * n:i + 3 * n]:
+                return True
+    return False
 
 
 def score_interview(transcript: str, questions: list[str], jd_text: str) -> dict:

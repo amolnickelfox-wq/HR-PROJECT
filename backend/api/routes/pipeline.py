@@ -126,10 +126,12 @@ def _fill_slots(p: dict):
         iid = _start_candidate_call(p["pipeline_id"], candidate, p)
         if iid:
             p["active"][iid] = candidate
-        elif candidate.get("no_answer_count", 0) < 1:
-            candidate["no_answer_count"] = candidate.get("no_answer_count", 0) + 1
-            p["queue"].append(candidate)   # retry once on Twilio call creation failure
-            print(f"[Pipeline] {candidate.get('name')} re-queued after call_failed (attempt #{candidate['no_answer_count']})")
+        elif candidate.get("call_failed_count", 0) < 1:
+            # Separate counter from no_answer_count so a call-creation failure doesn't
+            # consume the candidate's later no-answer retry budget.
+            candidate["call_failed_count"] = candidate.get("call_failed_count", 0) + 1
+            p["queue"].append(candidate)   # retry once on Twilio/Plivo call creation failure
+            print(f"[Pipeline] {candidate.get('name')} re-queued after call_failed (attempt #{candidate['call_failed_count']})")
         else:
             p["skipped"].append({**candidate, "skip_reason": "call_failed"})
         _save_pipeline(p["pipeline_id"], p)  # persist final state (active/re-queued/skipped)
@@ -146,6 +148,13 @@ def _on_pipeline_call_ended(interview_id: str, outcome: str):
         if interview_id in p.get("active", {}):
             target_pid = pid
             break
+
+    # Fallback: if the active-scan missed it (e.g. the terminal event raced slot-filling
+    # before active[iid] was populated), recover the owning pipeline from the interview's
+    # own stored pipeline_id — it's written before the call is ever placed.
+    if not target_pid:
+        iv = interview_store.get(interview_id)
+        target_pid = iv.get("pipeline_id") if iv else None
 
     if not target_pid:
         return

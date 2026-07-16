@@ -25,6 +25,7 @@ Phone-based AI recruitment pipeline: upload resumes → Claude scores them → T
 | `python-docx` | ≥1.1.0 | DOCX text extraction |
 | `python-multipart` | ≥0.0.9 | Multipart form uploads (file + form fields) |
 | `PyJWT` | (implicit) | JWT encode/decode in `auth.py` |
+| `plivo` | (optional) | Alternate call provider — see Call Provider Abstraction below |
 
 ### Frontend (React + Vite)
 | Package | Role |
@@ -67,6 +68,10 @@ GROQ_API_KEY=gsk_...
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_PHONE_NUMBER=+1...
+PLIVO_AUTH_ID=...                 # optional — only if using Plivo as call provider
+PLIVO_AUTH_TOKEN=...
+PLIVO_PHONE_NUMBER=+1...
+CALL_PROVIDER=twilio               # optional — default provider ("twilio" or "plivo"), toggle at runtime via /settings
 BASE_URL=https://xxxx.ngrok.io    # auto-set on startup if ngrok running
 COMPANY_NAME=NickelFox Technologies
 SUPER_ADMIN_USERNAME=director
@@ -94,15 +99,18 @@ backend/
     dependencies.py  — FastAPI dependency injection helpers
   api/routes/
     auth.py          — JWT auth, user management
-    interview.py     — ALL Twilio TwiML routes + _process_interview background job
+    interview.py     — Twilio-only TwiML routes + _process_interview background job + shared call-flow helpers (consent detection, callback-time parsing, _get_interview, _xml)
+    plivo.py         — Plivo-only TwiML routes — fully independent of interview.py's Twilio routes, imports only the provider-neutral helpers above
     batch.py         — Batch upload, /calls/active endpoint
     pipeline.py      — Pipeline orchestration (start/stop/status, _on_pipeline_call_ended)
     openings.py      — Job openings CRUD
     health.py        — Health check endpoint
     resume.py        — Single resume analyze endpoint
+    settings.py      — GET/PUT /settings (super_admin) — toggle call_provider twilio/plivo
   services/
-    interviewer.py   — Claude (questions + scoring), Groq Whisper, start_twilio_call()
-    email_service.py — Amazon SES SMTP welcome emails
+    interviewer.py       — Claude (questions + scoring), Groq Whisper, start_twilio_call()
+    email_service.py     — Amazon SES SMTP welcome emails
+    recording_cleanup.py — Daily job deleting recordings older than 89 days (Twilio + Plivo)
   utils/
     file_utils.py    — PDF/DOCX text extraction, job title extraction
 
@@ -140,8 +148,9 @@ frontend/src/
 | `opening_store` | `opening_id` (UUID) | Job opening title + JD text |
 | `pipeline_store` | `pipeline_id` (UUID) | Queue, active, completed, skipped, status |
 | `opening_pipeline` | `opening_id` | `pipeline_id` — one active pipeline per opening |
+| `settings_store` | `"call_provider"` | Active call provider (`"twilio"` or `"plivo"`) |
 
-`interview_store` is the live source of truth during a call. DB is ~1-2s behind. On startup, all stores are restored from PostgreSQL.
+`interview_store` is the live source of truth during a call. DB is ~1-2s behind. On startup, all stores are restored from PostgreSQL. `settings_store["call_provider"]` is seeded from the `CALL_PROVIDER` env var at import time, then **overridden by the DB-persisted value** (`app_settings` table) during the `main.py` lifespan startup — so a provider switch made via `PUT /settings` survives server restarts. See `app_settings` in Database Schema below.
 
 ---
 
@@ -152,6 +161,8 @@ frontend/src/
 
 ### `interviews`
 `id, opening_id, status, consent_status, consent_raw, consent_re_asked, candidate_name, phone, job_title, jd_text, twilio_call_sid, transcript, fail_reason, processing_step, callback_time_raw, callback_scheduled_at, questions (jsonb), recordings (jsonb), transcriptions (jsonb), repeat_counts (jsonb), score_result (jsonb), call_log (jsonb), created_at, updated_at`
+
+`call_log` — array of `{attempt, started_at, status, is_callback}` entries, one per dial attempt (initial call, pipeline retry, or scheduled callback re-dial); used to track multi-attempt history per interview.
 
 ### `batch_candidates`
 `id (serial), batch_id, single_id, opening_id, interview_id, file_name, name, email, phone, resume_score, filter_status, interview_status, interview_score, combined_score, callback_scheduled_at, resume_text, analyze_result (jsonb), score_result (jsonb), created_at, updated_at`
@@ -167,6 +178,11 @@ frontend/src/
 
 ### `users`
 `id (serial), username, full_name, password_hash, role, must_change_password, temp_expires_at, created_at`
+
+### `app_settings`
+`key (text, primary key), value (text), updated_at`
+
+Generic key/value store for runtime settings that must survive restarts. Currently holds one row: `call_provider`. Read via `_get_setting(key)`, written via `_set_setting(key, value)` (`backend/app/database.py`).
 
 ---
 
@@ -202,7 +218,7 @@ frontend/src/
 | POST | `/interview/local/next` | Get next question for browser interview |
 | POST | `/interview/local/score` | Score a browser interview conversation |
 
-### Twilio Webhooks
+### Twilio Webhooks (`backend/api/routes/interview.py` — Twilio-only, no Plivo code)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/POST | `/twilio/start/{id}` | Initial TwiML — greeting + consent gather |
@@ -210,7 +226,17 @@ frontend/src/
 | GET/POST | `/twilio/answer/{id}/{q}` | Answer recording handler (q = 0–6) |
 | GET/POST | `/twilio/callback-time/{id}` | Callback time parser |
 | POST | `/twilio/status/{id}` | Twilio call status callback |
-| POST | `/twilio/amd/{id}` | Async AMD callback (voicemail detection) |
+| POST | `/twilio/amd/{id}` | Async AMD callback (voicemail detection, active — hangs up on detection) |
+
+### Plivo Webhooks (`backend/api/routes/plivo.py` — Plivo-only, independent file)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET/POST | `/plivo/start/{id}` | Initial Answer XML — greeting + consent gather; also starts full-call recording via `calls.record()` (fire-and-forget background thread) |
+| GET/POST | `/plivo/consent/{id}` | Consent response handler |
+| GET/POST | `/plivo/answer/{id}/{q}` | Answer recording handler (q = 0–6) |
+| GET/POST | `/plivo/callback-time/{id}` | Callback time parser |
+| POST | `/plivo/status/{id}` | Plivo call status callback (hangup_url) |
+| POST | `/plivo/amd/{id}` | Async AMD callback — **observe-only**: logs machine detection but never hangs up (Plivo's AMD false-positived on 100% of real test pickups) |
 
 ### Batch
 | Method | Path | Description |
@@ -241,6 +267,8 @@ frontend/src/
 |--------|------|-------------|
 | GET | `/callbacks/due` | List overdue scheduled callbacks |
 | GET | `/health` | Health check |
+| GET | `/settings` | Get active call provider (super_admin only) |
+| PUT | `/settings` | Set active call provider — `"twilio"` or `"plivo"` (super_admin only) |
 
 ---
 
@@ -279,6 +307,30 @@ File: `backend/services/interviewer.py` → `start_twilio_call(phone, interview_
 - `<Gather input='speech' language='hi-IN en-IN'>` — bilingual speech recognition
 - `<Record maxLength='120' finishOnKey='#'>` — candidate answers, beep to start
 - `timeout=20` — ring timeout in seconds before Twilio fires no-answer
+
+### Call Provider — Twilio and Plivo are fully independent implementations
+Files: `backend/services/interviewer.py`, `backend/api/routes/interview.py` (Twilio), `backend/api/routes/plivo.py` (Plivo), `backend/api/routes/settings.py`
+
+Twilio and Plivo are **not** a shared/branching abstraction — they are two separate route files with their own XML helpers, field-name parsing, and webhook handlers. Only genuinely provider-neutral business logic is shared (imported by `plivo.py` from `interview.py`): `_detect_consent()`, `_parse_callback_time()`, `_is_repeat_request()`, `_process_interview()`, `_get_interview()`, `_xml()`/`_hangup_xml()`, `REPEAT_KEYWORDS`, `_TRANSITIONS`. None of these know or care which telecom provider placed the call. This split exists because the two providers previously shared branching helpers (`_provider()`-checks inside common functions), which made Plivo-specific bugs (see below) easy to introduce while touching Twilio code and vice versa.
+
+- `start_twilio_call(phone, interview_id)` (in `interviewer.py`) branches on `settings_store["call_provider"]` → calls `_start_twilio_call()` or `_start_plivo_call()` — this is the only place provider selection happens for placing the outbound call.
+- Active provider is set via `GET/PUT /settings` (super_admin only) and **persists across restarts** — `PUT` writes through to the `app_settings` DB table, and `main.py`'s startup lifespan restores it into `settings_store` (overriding the `CALL_PROVIDER` env default).
+- **Voice**: Twilio uses `Say voice='Google.en-IN-Neural2-A'`. Plivo uses `Speak voice='Polly.Kajal'` (Polly's neural bilingual Hindi/Indian-English voice, more natural than the older standard `Polly.Aditi`) wrapped in `<prosody rate='110%'>` to compensate for Kajal's slower default pace relative to Twilio's voice — tune this percentage by ear if it drifts, it's the only tuning knob (`plivo.py` → `_say()`).
+- **Speech recognition language**: Twilio listens for `hi-IN` and `en-IN` simultaneously (`<Gather language='hi-IN en-IN'>`). Plivo's `<GetInput>` only supports **one locale at a time** (a real platform limitation, not a bug) — currently set to `en-IN`. This only affects real-time ASR for consent/callback-time; the actual Q&A answers always go through Whisper (`transcribe_recording`), which handles Hindi/English/Hinglish natively regardless of provider.
+- **Full-call recording**: Twilio gets this via `record=True` at call creation. Plivo has no equivalent creation-time flag — `plivo.py`'s `/plivo/start` calls `plivo_client.calls.record(call_uuid=...)` once the call is answered, fired on a background thread so it can never delay/block the greeting response.
+- **AMD (voicemail detection)**: Twilio's is active — `/twilio/amd/{id}` hangs up on detection. Plivo's is **observe-only** — `/plivo/amd/{id}` logs `Machine=true` but never acts on it, because Plivo's AMD false-positived on 100% of real test pickups during development (see git history / this doc's revision notes if that needs revisiting).
+- Webhook payload field names differ by provider: `RecordingUrl`/`RecordingDuration`/`CallSid` (Twilio) vs `RecordUrl`/`RecordingDuration`/`CallUUID` (Plivo) — note `RecordingDuration` is the real field name for **both** providers, not `RecordDuration`.
+- Requires `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN`, `PLIVO_PHONE_NUMBER` in `.env` to use Plivo; `start_twilio_call()` raises if these are missing and `call_provider` is `"plivo"`.
+- **XML response encoding**: the shared `_xml()` helper (`interview.py`) sets `media_type="application/xml; charset=utf-8"` explicitly — Starlette only auto-appends `charset=utf-8` for `text/*` media types, not `application/*`, so this must stay explicit or non-ASCII characters in prompts (em-dashes, IPA phonemes, etc.) risk being misinterpreted by a stricter XML parser on either provider's end.
+
+### Recording Cleanup
+File: `backend/services/recording_cleanup.py`
+
+- `cleanup_old_recordings()` runs daily via APScheduler (job id `recording_cleanup_daily`, `misfire_grace_time=3600`)
+- Finds interviews created more than 89 days ago with non-empty `recordings`, deletes each recording from Twilio (`recordings(sid).delete()`) or Plivo (`recordings.delete(uuid)`) based on URL pattern
+- Also deletes the full-call recording by `twilio_call_sid` (column reused for Plivo's `CallUUID` too) — tries both `twilio_client.recordings.list(call_sid=...)` and `plivo_client.recordings.list(call_uuid=...)` since interviews don't record which provider placed the call; whichever lookup doesn't match just returns nothing
+- Clears `interviews.recordings` to `'{}'` and nulls `transcript_entries.recording_url` for cleaned interviews
+- Deletion failures (e.g. already-deleted / 404) are logged and skipped, not fatal
 
 ---
 
@@ -323,9 +375,35 @@ File: `backend/services/interviewer.py` → `start_twilio_call(phone, interview_
   → unparseable → status=declined, pipeline: declined
 ```
 
-**Global Twilio error handler** (`main.py`): `@app.exception_handler(Exception)` catches any unhandled
-exception on `/twilio/` routes and returns graceful TwiML ("We're having a technical issue, we'll call
-you back shortly") instead of Twilio's "application error has occurred" message.
+**Global error handler** (`main.py`): `@app.exception_handler(Exception)` catches any unhandled
+exception on `/twilio/` **or** `/plivo/` routes and returns a graceful voice response ("We're having a
+technical issue, we'll call you back shortly") instead of a raw error page — `_get_error_xml(is_plivo)`
+picks the right voice tag per provider.
+
+## Plivo Call Flow (`backend/api/routes/plivo.py`)
+
+Mirrors the Twilio flow above message-for-message and threshold-for-threshold (verified line-by-line) — same
+greeting, same consent re-ask/decline copy, same silence/repeat/pause-nudge logic and timing, same closing
+message. Only the provider-specific mechanics differ:
+
+```
+/plivo/start/{id}
+  → starts full-call recording via plivo_client.calls.record(call_uuid=...) on a background thread
+    (fire-and-forget — never blocks/delays the greeting response)
+  → same greeting as Twilio, via <Speak voice='Polly.Kajal'><prosody rate='110%'>
+  → <GetInput inputType='speech' language='en-IN'> "Is this a good time?"
+  → /plivo/consent/{id}
+
+/plivo/consent/{id} → /plivo/answer/{id}/{0..6} → /plivo/callback-time/{id}
+  → identical logic to the Twilio routes; field names are Plivo's own
+    (Speech, RecordUrl, RecordingDuration, CallUUID, Digits)
+
+/plivo/amd/{id}  [async, fires concurrently during active call]
+  → observe-only: logs "Machine=true" but never hangs up (see Call Provider Abstraction above for why)
+
+/plivo/status/{id}  [fires when Plivo call reaches terminal state — hangup_url]
+  → identical logic to /twilio/status/{id}; CallStatus is the same field name for both providers
+```
 
 ### `_process_interview()` (background thread, `interview.py`)
 1. `_processing_started` guard + `try/finally` cleanup (prevents permanent lock on crash)
@@ -444,6 +522,6 @@ Combined score (batch table): `resume_score × 0.4 + interview_score × 0.6`
 
 - `.env` in `.gitignore` — **never commit credentials**
 - All secrets via `os.getenv()` after `backend/app/config.py` loads
-- JWT required for all non-Twilio routes
-- Twilio webhooks are unauthenticated (public) — Twilio signs requests but signature validation not implemented; `BASE_URL` keeps them secret by obscurity
+- JWT required for all routes except `/twilio/*` and `/plivo/*` webhooks
+- Twilio and Plivo webhooks are unauthenticated (public) — both providers sign requests but signature validation isn't implemented for either; `BASE_URL` keeps them secret by obscurity
 - Passwords never stored in plain text

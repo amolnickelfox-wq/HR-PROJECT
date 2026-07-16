@@ -1,3 +1,5 @@
+import os
+
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     _scheduler = BackgroundScheduler()
@@ -12,6 +14,7 @@ batch_store:     dict = {}
 opening_store:   dict = {}
 pipeline_store:  dict = {}   # {pipeline_id: pipeline_data}
 opening_pipeline: dict = {}  # {opening_id: pipeline_id}  — one active pipeline per opening
+settings_store:  dict = {"call_provider": os.getenv("CALL_PROVIDER", "twilio")}
 
 DEFAULT_QUESTIONS = [
     "Tell me a bit about yourself and what brought you to apply for this role.",

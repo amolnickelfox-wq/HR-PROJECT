@@ -166,28 +166,55 @@ def _exp_numeric(exp_str: str | None) -> float:
     return float(m.group(1)) if m else 0.0
 
 
-def score_skills(resume_skills, jd_skills):
+def score_skills(resume_skills, required_skills, good_to_have_skills=None):
     rl = [s.lower() for s in resume_skills]
-    jl = [s.lower() for s in jd_skills]
-    matching_jd, missing_jd = [], []
-    for js in jl:
-        hit = any(js in rs or rs in js for rs in rl)
-        (matching_jd if hit else missing_jd).append(js)
-    skill_pct = len(matching_jd) / len(jl) if jl else 0.5
-    raw = round(skill_pct * 40)
-    matching_out = []
-    for m in matching_jd:
-        for rs in resume_skills:
-            if m in rs.lower() or rs.lower() in m:
-                matching_out.append(rs)
-                break
-        else:
-            matching_out.append(m.title())
-    return raw, list(dict.fromkeys(matching_out)), missing_jd
+    good_to_have_skills = good_to_have_skills or []
+
+    def _match(skill_list):
+        matching, missing = [], []
+        for js in [s.lower() for s in skill_list]:
+            hit = any(js in rs or rs in js for rs in rl)
+            (matching if hit else missing).append(js)
+        return matching, missing
+
+    req_match,  req_miss  = _match(required_skills)
+    opt_match,  opt_miss  = _match(good_to_have_skills)
+
+    req_score = round((len(req_match) / len(required_skills))    * 32) if required_skills    else 16
+    opt_score = round((len(opt_match) / len(good_to_have_skills)) *  8) if good_to_have_skills else  4
+    raw = min(40, req_score + opt_score)
+
+    def _display(matched_lower):
+        out = []
+        for m in matched_lower:
+            for rs in resume_skills:
+                if m in rs.lower() or rs.lower() in m:
+                    out.append(rs); break
+            else:
+                out.append(m.title())
+        return out
+
+    matching_out = _display(req_match) + _display(opt_match)
+    missing_out  = req_miss + opt_miss
+    return raw, list(dict.fromkeys(matching_out)), missing_out
 
 
-def score_experience(exp_str, jd_text):
+_EXP_LEVEL_RANGES = {
+    'Fresher (0-1 years)':   (0, 1),
+    'Junior (1-3 years)':    (1, 3),
+    'Mid-level (3-5 years)': (3, 5),
+    'Senior (5+ years)':     (5, 99),
+}
+
+def score_experience(exp_str, jd_text, experience_level=None):
     candidate = _exp_numeric(exp_str)
+    if experience_level and experience_level in _EXP_LEVEL_RANGES:
+        lo, hi = _EXP_LEVEL_RANGES[experience_level]
+        if candidate >= lo:
+            return 30
+        if candidate >= lo - 1:
+            return 18
+        return 12
     m = re.search(r'(\d+)\s*[–\-—to]+\s*(\d+)\s*years?', jd_text.lower())
     if not m:
         return 22
@@ -279,29 +306,46 @@ RESUME:
     return json.loads(_strip_markdown_json(raw))
 
 
-def _extract_jd_skills(jd_text: str) -> list[str]:
-    prompt = f"""List every technical skill, tool, language, or framework required or preferred in this job description.
-Return a JSON array of lowercase strings only. No markdown, no extra text.
+def _extract_jd_skills(jd_text: str) -> dict:
+    prompt = f"""From this job description, extract skills into two categories:
+- required_skills: skills listed as required, must-have, or core technical competencies
+- good_to_have_skills: skills listed as nice-to-have, good to have, preferred, or optional
+
+Return JSON with exactly these two keys, each an array of lowercase strings. No markdown, no extra text.
+If the JD does not distinguish, put all skills in required_skills and leave good_to_have_skills empty.
 
 JOB DESCRIPTION:
 {jd_text}"""
-    raw = _claude("You are a technical recruiter. Return only a valid JSON array of skill strings.", prompt)
-    return json.loads(_strip_markdown_json(raw))
+    raw = _claude("You are a technical recruiter. Return only valid JSON.", prompt)
+    result = json.loads(_strip_markdown_json(raw))
+    # Normalise: if Claude returns a plain list (legacy), treat as required
+    if isinstance(result, list):
+        return {"required_skills": result, "good_to_have_skills": []}
+    return result
 
 
-def _grok_analyze(resume_text: str, jd_text: str) -> dict:
+def _grok_analyze(resume_text: str, jd_text: str, jd_fields: dict = None) -> dict:
     parsed = _grok_parse(resume_text)
 
-    try:
-        jd_skills = _extract_jd_skills(jd_text)
-    except Exception:
-        jd_skills = extract_skills(jd_text)
+    if jd_fields:
+        required_skills  = [s.strip() for s in jd_fields.get('skills', '').split(',') if s.strip()]
+        good_to_have     = [s.strip() for s in jd_fields.get('goodToHave', '').split(',') if s.strip()]
+        experience_level = jd_fields.get('experienceLevel')
+    else:
+        try:
+            skills_data      = _extract_jd_skills(jd_text)
+            required_skills  = skills_data.get('required_skills', [])
+            good_to_have     = skills_data.get('good_to_have_skills', [])
+        except Exception:
+            required_skills  = extract_skills(jd_text)
+            good_to_have     = []
+        experience_level = None
 
     resume_skills = parsed.get("skills") or []
 
-    s_skill, matching_skills, missing_skills = score_skills(resume_skills, jd_skills)
+    s_skill, matching_skills, missing_skills = score_skills(resume_skills, required_skills, good_to_have)
     exp_years = parsed.get("experience_years")
-    s_exp  = score_experience(exp_years, jd_text)
+    s_exp  = score_experience(exp_years, jd_text, experience_level)
     s_proj = score_projects(resume_text, jd_text)
     s_edu  = score_education(resume_text)
     total  = min(100, s_skill + s_exp + s_proj + s_edu)
@@ -362,28 +406,36 @@ def parse_resume(resume_text: str) -> dict:
 _analyze_cache: dict = {}
 
 
-def analyze(resume_text: str, jd_text: str) -> dict:
-    cache_key = hashlib.md5((resume_text + jd_text).encode()).hexdigest()
+def analyze(resume_text: str, jd_text: str, jd_fields: dict = None) -> dict:
+    cache_key = hashlib.md5((resume_text + jd_text + str(jd_fields or {})).encode()).hexdigest()
     if cache_key in _analyze_cache:
         print(f"[Analyzer] cache hit {cache_key[:8]}")
         return _analyze_cache[cache_key]
 
     if claude_client:
         try:
-            result = _grok_analyze(resume_text, jd_text)
+            result = _grok_analyze(resume_text, jd_text, jd_fields)
             _analyze_cache[cache_key] = result
             return result
         except Exception as e:
             print(f"[Grok analyze fallback] {e}")
 
     parsed = parse_resume(resume_text)
-    jd_skills     = extract_skills(jd_text)
     resume_skills = parsed["skills"]
     exp_years     = parsed["experience_years"]
     candidate_exp = _exp_numeric(exp_years)
 
-    s_skill, matching_skills, missing_skills = score_skills(resume_skills, jd_skills)
-    s_exp  = score_experience(exp_years, jd_text)
+    if jd_fields:
+        required_skills  = [s.strip() for s in jd_fields.get('skills', '').split(',') if s.strip()]
+        good_to_have     = [s.strip() for s in jd_fields.get('goodToHave', '').split(',') if s.strip()]
+        experience_level = jd_fields.get('experienceLevel')
+    else:
+        required_skills  = extract_skills(jd_text)
+        good_to_have     = []
+        experience_level = None
+
+    s_skill, matching_skills, missing_skills = score_skills(resume_skills, required_skills, good_to_have)
+    s_exp  = score_experience(exp_years, jd_text, experience_level)
     s_proj = score_projects(resume_text, jd_text)
     s_edu  = score_education(resume_text)
     total  = min(100, s_skill + s_exp + s_proj + s_edu)

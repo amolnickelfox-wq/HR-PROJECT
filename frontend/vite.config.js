@@ -15,6 +15,8 @@ export default defineConfig({
       '/batch':        'http://localhost:8000',
       '/twilio':       'http://localhost:8000',
       '/openings':     'http://localhost:8000',
+      '/callbacks':    'http://localhost:8000',
+      '/settings':     'http://localhost:8000',
     },
   },
 })

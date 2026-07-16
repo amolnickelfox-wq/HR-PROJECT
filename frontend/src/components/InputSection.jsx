@@ -133,7 +133,13 @@ export default function InputSection({
     const form = new FormData()
     form.append('file', file)
     try {
-      const res = await fetch('/upload-resume', { method: 'POST', body: form })
+      const token = sessionStorage.getItem('auth_token')
+      const res = await fetch('/upload-resume', {
+        method:  'POST',
+        // No Content-Type here — the browser must set its own multipart boundary for FormData.
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        body:    form,
+      })
       if (!res.ok) {
         let detail = 'Upload failed'
         try { const err = await res.json(); detail = err.detail || detail } catch {}

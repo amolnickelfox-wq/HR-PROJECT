@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from backend.services.analyzer import analyze
 from backend.services.interviewer import generate_questions, start_twilio_call
 from backend.utils.file_utils import extract_text, extract_job_title
-from backend.app.state import interview_store, batch_store, DEFAULT_QUESTIONS
+from backend.app.state import interview_store, batch_store, opening_store, DEFAULT_QUESTIONS
 from backend.app.database import _save_batch, _save_interview
 
 router = APIRouter()
@@ -107,6 +107,18 @@ async def batch_status(batch_id: str):
                         rscore = c.get("resume_score")
                         if rscore is not None:
                             cd["combined_score"] = round(rscore * 0.4 + iscore * 0.6)
+        # Derive interview_score from score_result if DB column is NULL (e.g. _sync_candidate_interview missed)
+        if cd.get("score_result") and cd.get("interview_score") is None:
+            try:
+                raw    = cd["score_result"].get("interview_score", "0")
+                iscore = int(str(raw).split("/")[0].strip())
+                if iscore > 0:
+                    cd["interview_score"] = iscore
+                    rscore = c.get("resume_score")
+                    if rscore is not None:
+                        cd["combined_score"] = round(rscore * 0.4 + iscore * 0.6)
+            except Exception:
+                pass
         candidates_out.append(cd)
     return {
         "batch_id":  data["batch_id"],
@@ -125,13 +137,20 @@ def _process_batch(batch_id: str):
     jd_text    = data["jd_text"]
     candidates = data["candidates"]
 
+    jd_fields = None
+    opening_id = data.get("opening_id")
+    if opening_id:
+        opening = opening_store.get(opening_id)
+        if opening:
+            jd_fields = opening.get("jd_fields") or None
+
     def analyze_one(idx):
         cand = candidates[idx]
         if not cand["resume_text"]:
             cand["filter_status"] = "filtered_out"
             return
         try:
-            result    = analyze(cand["resume_text"], jd_text)
+            result    = analyze(cand["resume_text"], jd_text, jd_fields=jd_fields)
             score_str = result.get("match_score", "0 / 100")
             score_num = int(str(score_str).split("/")[0].strip())
             cand.update({

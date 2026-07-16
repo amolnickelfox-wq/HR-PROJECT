@@ -43,9 +43,13 @@ export function AppProvider({ children }) {
     } catch { return [] }
   })
 
-  // Sync openings + candidates from DB — single call, authoritative, runs every 10s
+  // Sync openings + candidates from DB — single call, authoritative, runs every 10s.
+  // No-ops while logged out (checked fresh on every call, not just at mount) — the interval
+  // itself still runs, but skips the network call until a token exists, so it self-resumes
+  // on the next tick after login without needing to know exactly when that happened.
   const _syncOpenings = useCallback(() => {
-    apiGetOpeningsFull().then(r => r.json()).then(dbOpenings => {
+    if (!sessionStorage.getItem('auth_token')) return Promise.resolve()
+    return apiGetOpeningsFull().then(r => r.json()).then(dbOpenings => {
       if (!Array.isArray(dbOpenings)) return
       setOpenings(prev => {
         const prevMap = Object.fromEntries(prev.map(o => [o.id, o]))
@@ -114,9 +118,10 @@ export function AppProvider({ children }) {
   const [dismissedCallbacks, setDismissedCallbacks] = useState({})
   const callbackAlertRef = useRef(null)
 
-  // Poll /callbacks/due every 15s — must fire promptly for all users
+  // Poll /callbacks/due every 15s — must fire promptly for all users (once logged in)
   useEffect(() => {
     const poll = async () => {
+      if (!sessionStorage.getItem('auth_token')) return
       try {
         const res = await apiCallbacksDue()
         if (!res.ok) return

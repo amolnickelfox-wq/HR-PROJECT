@@ -55,7 +55,8 @@ def _init_db():
                     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """))
-            # Add opening_id to existing DBs that predate this column
+            # Migrations for columns added after initial release
+            conn.execute(_sql("ALTER TABLE job_openings ADD COLUMN IF NOT EXISTS jd_fields JSONB"))
             conn.execute(_sql("ALTER TABLE interviews ADD COLUMN IF NOT EXISTS opening_id TEXT REFERENCES job_openings(id) ON DELETE SET NULL"))
             conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_iv_status    ON interviews(status)"))
             conn.execute(_sql("CREATE INDEX IF NOT EXISTS idx_iv_phone     ON interviews(phone)"))
@@ -162,11 +163,45 @@ def _init_db():
             # Migration: add jd_text/job_title for existing rows
             conn.execute(_sql("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS jd_text TEXT"))
             conn.execute(_sql("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS job_title TEXT"))
+            conn.execute(_sql("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key        TEXT        PRIMARY KEY,
+                    value      TEXT        NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
             conn.commit()
         print("[DB] PostgreSQL connected — tables ready")
     except Exception as e:
         print(f"[DB] Connection failed: {e} — running without persistence")
         _db_engine = None
+
+
+def _get_setting(key: str) -> str | None:
+    if not _db_engine:
+        return None
+    try:
+        with _db_engine.connect() as conn:
+            row = conn.execute(_sql("SELECT value FROM app_settings WHERE key = :k"), {"k": key}).first()
+            return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] _get_setting failed: {e}")
+        return None
+
+
+def _set_setting(key: str, value: str):
+    if not _db_engine:
+        return
+    try:
+        with _db_engine.connect() as conn:
+            conn.execute(_sql("""
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (:k, :v, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """), {"k": key, "v": value})
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] _set_setting failed: {e}")
 
 
 def _cb_ts(iso_str):
@@ -184,15 +219,17 @@ def _save_opening(oid: str, data: dict):
     try:
         with _db_engine.connect() as conn:
             conn.execute(_sql("""
-                INSERT INTO job_openings (id, title, jd_text, created_at)
-                VALUES (:id, :title, :jd_text, COALESCE(:created_at, NOW()))
+                INSERT INTO job_openings (id, title, jd_text, jd_fields, created_at)
+                VALUES (:id, :title, :jd_text, CAST(:jd_fields AS jsonb), COALESCE(:created_at, NOW()))
                 ON CONFLICT (id) DO UPDATE SET
-                    title   = EXCLUDED.title,
-                    jd_text = EXCLUDED.jd_text
+                    title     = EXCLUDED.title,
+                    jd_text   = EXCLUDED.jd_text,
+                    jd_fields = EXCLUDED.jd_fields
             """), {
                 "id":         oid,
                 "title":      data.get("title", ""),
                 "jd_text":    data.get("jd", ""),
+                "jd_fields":  json.dumps(data.get("jd_fields") or {}),
                 "created_at": _cb_ts(data.get("createdAt")),
             })
             conn.commit()
@@ -601,13 +638,13 @@ def _seed_super_admin(username: str, password: str):
         return
     try:
         with _db_engine.connect() as conn:
+            # DO NOTHING (not DO UPDATE) so a director who has changed their password
+            # is never silently reset back to SUPER_ADMIN_PASSWORD on every restart.
+            # First run still seeds the account; later runs leave the existing row intact.
             conn.execute(_sql("""
                 INSERT INTO users (username, password_hash, role, full_name)
                 VALUES (:u, :ph, 'super_admin', 'Director')
-                ON CONFLICT (username) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
-                    role          = 'super_admin',
-                    full_name     = COALESCE(users.full_name, 'Director')
+                ON CONFLICT (username) DO NOTHING
             """), {"u": username, "ph": _hash_password(password)})
             conn.commit()
     except Exception as e:
@@ -852,6 +889,7 @@ def load_stores() -> tuple[dict, dict, dict]:
                     "id":        orow["id"],
                     "title":     orow["title"],
                     "jd":        orow["jd_text"] or "",
+                    "jd_fields": orow["jd_fields"] or {},
                     "createdAt": ca.date().isoformat() if ca else "",
                     "stats":     {"total": 0, "qualified": 0, "done": 0},
                     "batchIds":  [],

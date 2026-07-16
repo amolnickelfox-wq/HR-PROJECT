@@ -12,7 +12,7 @@ const STATUS_MAP = {
 }
 
 export default function BatchProgress({ batchData }) {
-  const { total, completed, candidates } = batchData
+  const { total = 0, completed = 0, candidates = [] } = batchData || {}
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0
 
   return (

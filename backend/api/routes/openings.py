@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException
@@ -5,6 +6,7 @@ from pydantic import BaseModel
 
 from backend.app.state import opening_store
 from backend.app.database import _save_opening, _delete_opening
+from backend.services.interviewer import claude_client, CLAUDE_MODEL
 
 router = APIRouter()
 
@@ -14,11 +16,74 @@ class OpeningCreate(BaseModel):
     title: str
     jd: str = ''
     createdAt: str = ''
+    jd_fields: dict | None = None
 
 
 class OpeningUpdate(BaseModel):
     title: str | None = None
     jd: str | None = None
+
+
+class JdGenerateRequest(BaseModel):
+    job_title: str
+    experience_level: str
+    responsibilities: str
+    skills: str
+    good_to_have: str = ""
+    preferred_qualifications: str = ""
+    work_mode: str
+    perks: str = ""
+
+
+@router.post("/openings/generate-jd")
+async def generate_jd(body: JdGenerateRequest):
+    if not claude_client:
+        raise HTTPException(500, "Claude API not configured.")
+    good_to_have_section = (
+        f"\n\nGood to Have Skills\n{body.good_to_have}"
+        if body.good_to_have.strip() else ""
+    )
+    preferred_qual_section = (
+        f"\n\nPreferred Qualifications\n{body.preferred_qualifications}"
+        if body.preferred_qualifications.strip() else ""
+    )
+    perks_hint = body.perks.strip() or "mentorship, cross-domain projects, health insurance, learning budget"
+    prompt = f"""Expand the following job details into a polished job description. Use EXACTLY these section headings in this order, and no others. Do not add any intro, summary, or "About the company" section.
+
+Job Title: {body.job_title}
+Experience Level: {body.experience_level}
+
+Key Responsibilities
+{body.responsibilities}
+
+Required Technical Skills & Stack
+{body.skills}{good_to_have_section}{preferred_qual_section}
+
+Work Mode
+{body.work_mode}
+
+What We Offer
+{perks_hint}
+
+Instructions:
+- Start with a "Role Summary" section: 2 sentences max. What the role is and what we need.
+- Then include the remaining sections with headings word-for-word as shown above.
+- Under "Key Responsibilities": 4-5 tight bullet points, action verbs only.
+- Under "Required Technical Skills & Stack": bullet list of skills as-is; do not invent or expand.
+- Under "Good to Have Skills" (include only if provided): bullet list as-is; do not invent or expand.
+- Under "Preferred Qualifications" (include only if provided): 2-3 bullets max.
+- Under "Work Mode": one short phrase, no full sentence needed.
+- Under "What We Offer": 4-5 bullets; use hints provided, no padding.
+- Total output under 250 words. Crisp, no filler phrases. Return only the job description, no preamble."""
+    try:
+        resp = claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return {"jd": resp.content[0].text.strip()}
+    except Exception as e:
+        raise HTTPException(500, f"JD generation failed: {e}")
 
 
 @router.post("/openings", status_code=201)
@@ -28,6 +93,7 @@ async def create_opening(req: OpeningCreate):
         "title":     req.title,
         "jd":        req.jd,
         "createdAt": req.createdAt,
+        "jd_fields": req.jd_fields or {},
     }
     _save_opening(req.id, opening_store[req.id])
     return opening_store[req.id]
@@ -95,6 +161,18 @@ async def list_openings_full():
             c["interview_status"] = iv_status
             if iv_score_result and not c.get("score_result"):
                 c["score_result"] = iv_score_result
+
+        if c.get("score_result") and c.get("interview_score") is None:
+            try:
+                raw    = c["score_result"].get("interview_score", "0")
+                iscore = int(str(raw).split("/")[0].strip())
+                if iscore > 0:
+                    c["interview_score"] = iscore
+                    rscore = c.get("resume_score")
+                    if rscore is not None:
+                        c["combined_score"] = round(rscore * 0.4 + iscore * 0.6)
+            except Exception:
+                pass
 
         if c.get("callback_scheduled_at"):
             c["callback_scheduled_at"] = c["callback_scheduled_at"].isoformat()
@@ -187,6 +265,18 @@ async def get_opening_candidates(opening_id: str):
             c["interview_status"] = iv_status
             if iv_score_result and not c.get("score_result"):
                 c["score_result"] = iv_score_result
+
+        if c.get("score_result") and c.get("interview_score") is None:
+            try:
+                raw    = c["score_result"].get("interview_score", "0")
+                iscore = int(str(raw).split("/")[0].strip())
+                if iscore > 0:
+                    c["interview_score"] = iscore
+                    rscore = c.get("resume_score")
+                    if rscore is not None:
+                        c["combined_score"] = round(rscore * 0.4 + iscore * 0.6)
+            except Exception:
+                pass
 
         if c.get("callback_scheduled_at"):
             c["callback_scheduled_at"] = c["callback_scheduled_at"].isoformat()

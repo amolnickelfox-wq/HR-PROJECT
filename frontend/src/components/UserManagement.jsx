@@ -105,11 +105,18 @@ export default function UserManagement({ onClose, initialSection = null, onPassw
   const handleRemove = async (uname) => {
     if (!window.confirm(`Remove access for "${uname}"? They will no longer be able to log in.`)) return
     try {
-      await fetch(`/auth/users/${encodeURIComponent(uname)}`, {
+      const res = await fetch(`/auth/users/${encodeURIComponent(uname)}`, {
         method: 'DELETE', headers: getAuthHeaders(),
       })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        alert(err.detail || 'Failed to remove user.')
+        return
+      }
       await fetchUsers()
-    } catch {}
+    } catch {
+      alert('Network error — could not remove user.')
+    }
   }
 
   const handleChangeMyPassword = async (e) => {
@@ -149,8 +156,13 @@ export default function UserManagement({ onClose, initialSection = null, onPassw
         body:    JSON.stringify({ new_password: newPass }),
       })
       if (res.ok) alert('Password updated successfully.')
-      else alert('Failed to update password.')
-    } catch {}
+      else {
+        const err = await res.json().catch(() => ({}))
+        alert(err.detail || 'Failed to update password.')
+      }
+    } catch {
+      alert('Network error — could not update password.')
+    }
   }
 
   const showSection = (section) =>

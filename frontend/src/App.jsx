@@ -12,12 +12,34 @@ import BatchResultsTable    from './components/BatchResultsTable'
 import CallbackAlertModal  from './components/CallbackAlertModal'
 import LoginPage         from './components/LoginPage'
 import UserManagement   from './components/UserManagement'
+import JdBuilder        from './components/JdBuilder'
+import Settings         from './components/Settings'
 
 import { apiStartPipeline, apiPipelineStatus, apiStopPipeline, apiActiveCalls, safeJson } from './api/client'
 import { useAppContext }  from './context/AppContext'
 import { useAnalyze }    from './hooks/useAnalyze'
 import { useInterview }  from './hooks/useInterview'
 import { useBatch }      from './hooks/useBatch'
+
+function JdCopyButton({ text }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = async () => {
+    try { await navigator.clipboard.writeText(text) }
+    catch {
+      const el = document.createElement('textarea')
+      el.value = text; document.body.appendChild(el); el.select()
+      document.execCommand('copy'); document.body.removeChild(el)
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <button className="btn-clear" onClick={handleCopy}
+      style={{ flex: '0 0 auto', padding: '9px 18px' }}>
+      {copied ? '✓ Copied!' : 'Copy JD'}
+    </button>
+  )
+}
 
 function OpeningContextBar({ opening, openings, onLink, onUnlink, showEmpty = true }) {
   if (opening) return (
@@ -48,6 +70,8 @@ const PAGE_TITLES = {
   'change-password': 'Change Password',
   'add-user':        'Add User',
   'user-list':       'User List',
+  'jd-builder':      'JD Builder',
+  'settings':        'Settings',
 }
 
 export default function App() {
@@ -72,8 +96,6 @@ export default function App() {
       })
       .catch(() => { sessionStorage.removeItem('auth_token'); sessionStorage.removeItem('auth_user'); setAuthUser(null) })
   }, [])
-
-  const [showUserMgmt, setShowUserMgmt] = useState(false)
 
   const handleLogout = async () => {
     const token = sessionStorage.getItem('auth_token')
@@ -102,9 +124,17 @@ export default function App() {
     syncOpenings,
   } = useAppContext()
 
+  // Kick an immediate sync right after login — the context's own polling loop only
+  // resumes on its next tick (up to 10s later) once a token exists, which would
+  // otherwise leave the dashboard looking empty/stale for a moment post-login.
+  useEffect(() => {
+    if (authUser) syncOpenings()
+  }, [authUser, syncOpenings])
+
   // ── navigation ──
   const [activePage, setActivePage] = useState('dashboard')
   const [addCandidatesOpeningId, setAddCandidatesOpeningId] = useState(null)
+  const [viewingJdId, setViewingJdId] = useState(null)
 
   const resultsRef       = useRef(null)
   const currentSingleIdRef = useRef(null)
@@ -651,8 +681,14 @@ export default function App() {
                                 Add Candidates
                               </button>
                             )}
-
-
+                            {op.jd && (
+                              <button className="opening-btn opening-btn--jd"
+                                onClick={() => setViewingJdId(op.id)}
+                                style={{ marginTop: 8 }}>
+                                <Stack size={15} weight="duotone" />
+                                View JD
+                              </button>
+                            )}
                           </div>
                         </>
                       )}
@@ -669,6 +705,50 @@ export default function App() {
                   </button>
                 )}
               </div>
+
+              {/* ── JD Viewer Modal ── */}
+              {viewingJdId && (() => {
+                const op = openings.find(o => o.id === viewingJdId)
+                if (!op) return null
+                return (
+                  <div className="modal-overlay" onClick={() => setViewingJdId(null)}>
+                    <div className="modal-box" style={{ maxWidth: 680, width: '90vw' }}
+                         onClick={e => e.stopPropagation()}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text)' }}>{op.title}</div>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--text-3)', marginTop: 3 }}>Job Description</div>
+                        </div>
+                        <button className="opening-icon-btn" onClick={() => setViewingJdId(null)} title="Close">
+                          <X size={16} weight="bold" />
+                        </button>
+                      </div>
+                      <pre style={{
+                        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                        background: 'var(--bg)', border: '1px solid var(--border)',
+                        borderRadius: 8, padding: '14px 16px',
+                        fontSize: '0.83rem', color: 'var(--text-2)', lineHeight: 1.65,
+                        maxHeight: 420, overflowY: 'auto', margin: 0,
+                      }}>
+                        {op.jd}
+                      </pre>
+                      <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+                        <JdCopyButton text={op.jd} />
+                        {canEdit && (
+                          <button className="btn-clear" style={{ flex: '0 0 auto', padding: '9px 18px' }}
+                            onClick={() => { setViewingJdId(null); setEditingOpeningId(op.id); setEditingJd(op.jd || '') }}>
+                            Edit JD
+                          </button>
+                        )}
+                        <button className="btn-analyze" style={{ flex: 1 }}
+                          onClick={() => setViewingJdId(null)}>
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
 
               {showOpeningForm && (
                 <div className="opening-create-form">
@@ -1165,6 +1245,16 @@ export default function App() {
               )
           })()}
 
+          {/* ── JD Builder (admin + super_admin only) ── */}
+          {canEdit && activePage === 'jd-builder' && (
+            <JdBuilder onNavigate={handleNavigate} syncOpenings={syncOpenings} />
+          )}
+
+          {/* ── Settings (super_admin only) ── */}
+          {authUser?.role === 'super_admin' && activePage === 'settings' && (
+            <Settings />
+          )}
+
           {/* ── Change Password (all roles) + Manage Access (super_admin only) ── */}
           {(activePage === 'change-password' ||
             (authUser?.role === 'super_admin' && (activePage === 'add-user' || activePage === 'user-list'))
@@ -1271,8 +1361,6 @@ export default function App() {
           }}
         />
       )}
-
-      {showUserMgmt && <UserManagement onClose={() => setShowUserMgmt(false)} />}
 
     </div>
   )

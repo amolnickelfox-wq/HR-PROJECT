@@ -15,7 +15,8 @@ from pydantic import BaseModel
 
 from backend.services.interviewer import (
     generate_questions, transcribe_recording, score_interview,
-    start_twilio_call, get_next_question, score_conversation,
+    start_twilio_call,
+    twilio_client, HALLUCINATION_MARKER,
 )
 from backend.utils.file_utils import extract_job_title
 from backend.app.state import interview_store, batch_store, DEFAULT_QUESTIONS, _scheduler, _SCHEDULER_OK
@@ -84,6 +85,25 @@ def _get_interview(interview_id: str) -> dict | None:
     return data
 
 
+# ─── Twilio TwiML helpers (this file is Twilio-only — see plivo.py for the
+# independent Plivo call flow; nothing in this file branches on provider) ────
+def _say(text: str) -> str:
+    return f"<Say voice='Google.en-IN-Neural2-A'>{text}</Say>"
+
+def _gather(action: str, speech_timeout: int = 3) -> str:
+    return f"<Gather input='speech' speechTimeout='{speech_timeout}' language='hi-IN en-IN' action='{action}' method='POST'>"
+
+def _gather_close() -> str:
+    return "</Gather>"
+
+def _is_machine(form) -> bool:
+    return form.get("AnsweredBy", "").startswith("machine")
+
+def _terminate_call(call_sid: str):
+    if twilio_client:
+        twilio_client.calls(call_sid).update(status="completed")
+
+
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
 class InterviewRequest(BaseModel):
     phone: str
@@ -95,29 +115,9 @@ class InterviewRequest(BaseModel):
     single_id: str | None = None
 
 
-class SimulateRequest(BaseModel):
-    resume_text: str
-    jd_text: str
-    answers: list[str]
-    candidate_name: str | None = None
-
-
-class LocalChatRequest(BaseModel):
-    resume_text: str
-    jd_text: str
-    conversation: list[dict]
-    candidate_name: str | None = None
-
-
-class LocalScoreRequest(BaseModel):
-    resume_text: str
-    jd_text: str
-    conversation: list[dict]
-
-
 # ─── TwiML helpers ───────────────────────────────────────────────────────────
 def _xml(content: str) -> Response:
-    return Response(content=f'<?xml version="1.0" encoding="UTF-8"?>\n{content}', media_type="application/xml")
+    return Response(content=f'<?xml version="1.0" encoding="UTF-8"?>\n{content}', media_type="application/xml; charset=utf-8")
 
 
 def _hangup_xml() -> Response:
@@ -342,39 +342,6 @@ async def get_interview_questions(req: _QuestionsRequest):
     return {"questions": questions}
 
 
-@router.post("/interview/simulate")
-async def simulate_interview(req: SimulateRequest):
-    try:
-        questions = generate_questions(req.resume_text, req.jd_text)
-    except Exception:
-        questions = DEFAULT_QUESTIONS[:]
-    answers  = list(req.answers) + ["[no answer provided]"] * max(0, len(questions) - len(req.answers))
-    answers  = answers[:len(questions)]
-    lines    = [f"Q{i+1}: {q}\nA{i+1}: {a}" for i, (q, a) in enumerate(zip(questions, answers))]
-    transcript = "\n\n".join(lines)
-    try:
-        score_result = score_interview(transcript, questions, req.jd_text)
-    except Exception as e:
-        raise HTTPException(500, f"Scoring failed: {e}")
-    return {"questions": questions, "transcript": transcript, "score_result": score_result}
-
-
-@router.post("/interview/local/next")
-async def local_interview_next(req: LocalChatRequest):
-    try:
-        return get_next_question(req.resume_text, req.jd_text, req.conversation, req.candidate_name)
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
-@router.post("/interview/local/score")
-async def local_interview_score(req: LocalScoreRequest):
-    try:
-        return score_conversation(req.conversation, req.jd_text)
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
 @router.post("/interview/start")
 async def start_interview(req: InterviewRequest):
     if not req.phone.strip(): raise HTTPException(400, "Phone number is required.")
@@ -537,20 +504,20 @@ async def twilio_start(interview_id: str):
     base_url    = os.getenv("BASE_URL", "").rstrip("/")
     data["consent_status"] = "pending"
 
-    return _xml(
-        f"<Response>"
-        f"<Say voice='Google.en-IN-Neural2-A'>"
+    greeting_text = (
         f"Hello, could I please speak with {safe_name}? "
         f"<break time='500ms'/>"
         f"Hi {safe_name}! This is Sarah calling from the HR team at <phoneme alphabet='ipa' ph='nɪkəlfɒks'>NickelFox</phoneme> Technologies. "
         f"I'm reaching out regarding your application for the {safe_title} role. "
         f"<break time='300ms'/>"
-        f"</Say>"
-        f"<Gather input='speech' speechTimeout='3' language='hi-IN en-IN' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
-        f"<Say voice='Google.en-IN-Neural2-A'>"
-        f"I'd like to conduct a brief screening round — it should only take about 5 to 7 minutes. Would now be a good time?"
-        f"</Say>"
-        f"</Gather>"
+    )
+    _screen_msg = "I'd like to conduct a brief screening round — it should only take about 5 to 7 minutes. Would now be a good time?"
+    return _xml(
+        f"<Response>"
+        f"{_say(greeting_text)}"
+        f"{_gather(f'{base_url}/twilio/consent/{interview_id}', 2)}"
+        f"{_say(_screen_msg)}"
+        f"{_gather_close()}"
         f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
         f"</Response>"
     )
@@ -587,11 +554,12 @@ async def twilio_consent(
         if not data.get("consent_re_asked"):
             data["consent_re_asked"] = True
             _save_interview(interview_id, data)
+            _reask_msg = "Oh, I'm sorry about that — I didn't quite catch your response! Could you let me know — just say yes if you're ready, or no if now isn't the best time?"
             return _xml(
                 f"<Response>"
-                f"<Gather input='speech' speechTimeout='3' language='hi-IN en-IN' action='{base_url}/twilio/consent/{interview_id}' method='POST'>"
-                f"<Say voice='Google.en-IN-Neural2-A'>Oh, I'm sorry about that — I didn't quite catch your response! Could you let me know — just say yes if you're ready, or no if now isn't the best time?</Say>"
-                f"</Gather>"
+                f"{_gather(f'{base_url}/twilio/consent/{interview_id}', 2)}"
+                f"{_say(_reask_msg)}"
+                f"{_gather_close()}"
                 f"<Redirect method='POST'>{base_url}/twilio/consent/{interview_id}</Redirect>"
                 f"</Response>"
             )
@@ -611,9 +579,7 @@ async def twilio_consent(
     if _detect_consent(transcript):
         data["consent_status"] = "accepted"
         _save_interview(interview_id, data)
-        return _xml(
-            f"<Response>"
-            f"<Say voice='Google.en-IN-Neural2-A'>"
+        accepted_text = (
             f"Thank you, {safe_name} — I appreciate you taking the time. "
             f"<break time='200ms'/>"
             f"Just a quick heads up — I'll ask you {total} questions. When you're done answering, press the # key to move ahead. "
@@ -624,7 +590,10 @@ async def twilio_consent(
             f"Here's my first question — "
             f"<break time='300ms'/>"
             f"{safe_q0}"
-            f"</Say>"
+        )
+        return _xml(
+            f"<Response>"
+            f"{_say(accepted_text)}"
             f"<Record"
             f"  action='{base_url}/twilio/answer/{interview_id}/0'"
             f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
@@ -635,15 +604,16 @@ async def twilio_consent(
     else:
         data["consent_status"] = "declined"
         _save_interview(interview_id, data)
+        declined_text = (
+            "Of course, completely understandable! "
+            "Could you let me know a time that works better for you? "
+            "Something like — in 30 minutes, today at 5 PM, or tomorrow morning would be perfect."
+        )
         return _xml(
             f"<Response>"
-            f"<Gather input='speech' speechTimeout='4' language='hi-IN en-IN' action='{base_url}/twilio/callback-time/{interview_id}' method='POST'>"
-            f"<Say voice='Google.en-IN-Neural2-A'>"
-            f"Of course, completely understandable! "
-            f"Could you let me know a time that works better for you? "
-            f"Something like — in 30 minutes, today at 5 PM, or tomorrow morning would be perfect."
-            f"</Say>"
-            f"</Gather>"
+            f"{_gather(f'{base_url}/twilio/callback-time/{interview_id}', 4)}"
+            f"{_say(declined_text)}"
+            f"{_gather_close()}"
             f"<Redirect method='POST'>{base_url}/twilio/callback-time/{interview_id}</Redirect>"
             f"</Response>"
         )
@@ -705,12 +675,10 @@ async def twilio_callback_time(
                 readable = datetime.fromisoformat(dt_str).strftime("%A at %I:%M %p")
             except Exception:
                 readable = "the time you mentioned"
+            _callback_msg = f"Perfect! We'll give you a call back on {html.escape(readable)}. Thanks so much for your time today — have a wonderful day!"
             return _xml(
                 f"<Response>"
-                f"<Say voice='Google.en-IN-Neural2-A'>"
-                f"Perfect! We'll give you a call back on {html.escape(readable)}. "
-                f"Thanks so much for your time today — have a wonderful day!"
-                f"</Say>"
+                f"{_say(_callback_msg)}"
                 f"<Hangup/>"
                 f"</Response>"
             )
@@ -729,21 +697,18 @@ async def twilio_callback_time(
                 pass
             return _xml(
                 f"<Response>"
-                f"<Say voice='Google.en-IN-Neural2-A'>"
-                f"No problem at all — we appreciate your time. If you change your mind, feel free to reach out to us. Have a wonderful day!"
-                f"</Say>"
+                f"{_say('No problem at all — we appreciate your time. If you change your mind, feel free to reach out to us. Have a wonderful day!')}"
                 f"<Hangup/>"
                 f"</Response>"
             )
     except Exception as _e:
         print(f"[TwiML] twilio_callback_time unhandled error for {interview_id}: {_e}")
+        _tech_err_msg = "We're having a technical issue. We'll call you back shortly. Goodbye!"
         return _xml(
-            "<Response>"
-            "<Say voice='Google.en-IN-Neural2-A'>"
-            "We're having a technical issue. We'll call you back shortly. Goodbye!"
-            "</Say>"
-            "<Hangup/>"
-            "</Response>"
+            f"<Response>"
+            f"{_say(_tech_err_msg)}"
+            f"<Hangup/>"
+            f"</Response>"
         )
 
 
@@ -763,13 +728,12 @@ async def twilio_answer(
         if not data:
             return _hangup_xml()
 
-        if CallSid:
-            data["twilio_call_sid"] = CallSid
-
-        questions = data["questions"]
-        total     = len(questions)
-        base_url  = os.getenv("BASE_URL", "").rstrip("/")
-        duration  = int(RecordingDuration or "0")
+        questions    = data["questions"]
+        total        = len(questions)
+        base_url     = os.getenv("BASE_URL", "").rstrip("/")
+        rec_url_val  = RecordingUrl
+        call_sid_val = CallSid
+        duration     = int(RecordingDuration or "0")
 
         print(f"[Twilio answer] interview={interview_id} q={q_idx}/{total-1} duration={duration}s digits={Digits!r}")
 
@@ -777,20 +741,23 @@ async def twilio_answer(
             print(f"[Twilio answer] q_idx={q_idx} out of bounds (total={total}) — hanging up")
             return _hangup_xml()
 
-        if RecordingUrl and not data["transcriptions"].get(q_idx):
+        if call_sid_val:
+            data["twilio_call_sid"] = call_sid_val
+
+        if rec_url_val and not data["transcriptions"].get(q_idx):
             data["status"] = "processing"
 
             # Truly silent or near-silent (Whisper hallucinates on < 3s clips)
-            if duration < 3 and not Digits:
+            # Also catches rapid # presses — finishOnKey does NOT bypass the minimum duration
+            if duration < 3:
                 retries = data["repeat_counts"].get(q_idx, 0) + 1
                 data["repeat_counts"][q_idx] = retries
                 if retries < 3:
                     print(f"[Twilio answer] silence q={q_idx} retry={retries}/3")
+                    _silence_msg = "Hmm, that was too short to capture. Please share your answer after the beep and press the # key when you're finished."
                     return _xml(
                         f"<Response>"
-                        f"<Say voice='Google.en-IN-Neural2-A'>"
-                        f"Hmm, I didn't catch anything there. Please go ahead and answer after the beep, then press the # key when you're done."
-                        f"</Say>"
+                        f"{_say(_silence_msg)}"
                         f"<Record"
                         f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
                         f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
@@ -800,7 +767,15 @@ async def twilio_answer(
                     )
                 else:
                     print(f"[Twilio answer] silence q={q_idx} max retries — marking no answer")
-                    data["transcriptions"][q_idx] = "[no answer provided]"
+                    # If earlier segments of this answer were captured before a mid-answer
+                    # pause (see the pause-hint branch below), use that instead of discarding
+                    # it — going silent on the FINAL segment doesn't mean nothing was said.
+                    pending = data.get("_pending_answer_parts", {}).pop(q_idx, None)
+                    data["transcriptions"][q_idx] = " ".join(pending) if pending else "[no answer provided]"
+                    # Record the (short) URL too so an all-silent interview still has a
+                    # non-empty recordings dict — otherwise the status callback misclassifies
+                    # a fully-reached interview as "abandoned".
+                    data["recordings"][q_idx] = rec_url_val
 
             else:
                 # Transcribe first — repeat check must happen before pause hint
@@ -810,7 +785,7 @@ async def twilio_answer(
                     _result_holder = [None]
                     def _transcribe_bg():
                         try:
-                            _result_holder[0] = transcribe_recording(RecordingUrl + ".mp3", fast=False)
+                            _result_holder[0] = transcribe_recording(rec_url_val, fast=False)
                         except Exception as _te:
                             print(f"[Twilio answer] transcription error: {_te}")
                     _t = _th.Thread(target=_transcribe_bg, daemon=True)
@@ -841,11 +816,10 @@ async def twilio_answer(
                         data["status"] = "calling"
                         print(f"[Twilio answer] repeat detected q={q_idx} count={repeat_count+1}/2 — re-asking")
                         safe_q = html.escape(questions[q_idx])
+                        _repeat_msg = f"Of course, happy to repeat that! <break time='400ms'/>{safe_q}"
                         return _xml(
                             f"<Response>"
-                            f"<Say voice='Google.en-IN-Neural2-A'>"
-                            f"Of course, happy to repeat that! <break time='400ms'/>{safe_q}"
-                            f"</Say>"
+                            f"{_say(_repeat_msg)}"
                             f"<Record"
                             f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
                             f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
@@ -861,11 +835,17 @@ async def twilio_answer(
                 # Skip if maxLength (120s) was hit — treat as completed answer
                 if duration > 6 and not Digits and duration < 118:
                     print(f"[Twilio answer] spoke then paused q={q_idx} — prompting press #")
+                    # Save this segment instead of silently discarding it — a candidate who
+                    # pauses mid-answer (e.g. to think through a technical question) would
+                    # otherwise lose everything said before the pause, since a fresh Record
+                    # starts for the same question and only the last segment used to survive.
+                    if quick_text and quick_text != HALLUCINATION_MARKER:
+                        pending = data.setdefault("_pending_answer_parts", {})
+                        pending.setdefault(q_idx, []).append(quick_text)
+                    _pause_msg = "Whenever you're ready, just press the # key to wrap up your answer."
                     return _xml(
                         f"<Response>"
-                        f"<Say voice='Google.en-IN-Neural2-A'>"
-                        f"Whenever you're ready, just press the # key to wrap up your answer."
-                        f"</Say>"
+                        f"{_say(_pause_msg)}"
                         f"<Record"
                         f"  action='{base_url}/twilio/answer/{interview_id}/{q_idx}'"
                         f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
@@ -874,9 +854,16 @@ async def twilio_answer(
                         f"</Response>"
                     )
 
-                data["recordings"][q_idx] = RecordingUrl + ".mp3"
-                if quick_text:
-                    data["transcriptions"][q_idx] = quick_text
+                data["recordings"][q_idx] = rec_url_val
+                # Don't cache a hallucination-flagged result as final — treat it the same
+                # as an inline-transcription timeout (quick_text=None) and leave it unset so
+                # _process_interview()'s background pass gets a genuine, unhurried second
+                # attempt at this recording (which may also be more fully processed/available
+                # by then than during the live call's 12s inline window).
+                if quick_text and quick_text != HALLUCINATION_MARKER:
+                    # Merge in any earlier segments saved before a mid-answer pause.
+                    pending = data.get("_pending_answer_parts", {}).pop(q_idx, None)
+                    data["transcriptions"][q_idx] = " ".join(pending + [quick_text]) if pending else quick_text
 
             if q_idx + 1 < total:
                 data["status"] = "calling"
@@ -889,11 +876,10 @@ async def twilio_answer(
             safe_next_q = html.escape(questions[next_q])
             transition  = _TRANSITIONS[next_q % len(_TRANSITIONS)]
             midpoint    = " We're halfway through — you're doing brilliantly! <break time='300ms'/>" if next_q == total // 2 else ""
+            _next_msg = f"{transition}{midpoint} <break time='400ms'/>{safe_next_q}"
             return _xml(
                 f"<Response>"
-                f"<Say voice='Google.en-IN-Neural2-A'>"
-                f"{transition}{midpoint} <break time='400ms'/>{safe_next_q}"
-                f"</Say>"
+                f"{_say(_next_msg)}"
                 f"<Record"
                 f"  action='{base_url}/twilio/answer/{interview_id}/{next_q}'"
                 f"  maxLength='120' playBeep='true' finishOnKey='#' timeout='5'"
@@ -905,27 +891,23 @@ async def twilio_answer(
             print(f"[Twilio answer] all questions done — closing call")
             data["status"] = "processing"
             background_tasks.add_task(_process_interview, interview_id)
+            _closing_msg = "That's all my questions for today — you did a wonderful job! It was genuinely lovely speaking with you. Our team will be in touch very soon. Wishing you a brilliant rest of your day — take care!"
             return _xml(
-                "<Response>"
-                "<Say voice='Google.en-IN-Neural2-A'>"
-                "That's all my questions for today — you did a wonderful job! "
-                "It was genuinely lovely speaking with you. "
-                "Our team will be in touch very soon. Wishing you a brilliant rest of your day — take care!"
-                "</Say>"
-                "<Hangup/>"
-                "</Response>"
+                f"<Response>"
+                f"{_say(_closing_msg)}"
+                f"<Hangup/>"
+                f"</Response>"
             )
 
     except Exception as e:
         print(f"[Twilio answer] UNHANDLED ERROR at q={q_idx}: {e}")
         traceback.print_exc()
+        _ans_err_msg = "Oh, I'm so sorry — we seem to have hit a small technical hiccup. Thank you so much for your time today, and we'll be in touch soon. Take care!"
         return _xml(
-            "<Response>"
-            "<Say voice='Google.en-IN-Neural2-A'>"
-            "Oh, I'm so sorry — we seem to have hit a small technical hiccup. Thank you so much for your time today, and we'll be in touch soon. Take care!"
-            "</Say>"
-            "<Hangup/>"
-            "</Response>"
+            f"<Response>"
+            f"{_say(_ans_err_msg)}"
+            f"<Hangup/>"
+            f"</Response>"
         )
 
 
@@ -939,7 +921,7 @@ async def twilio_status_callback(interview_id: str, request: Request, background
     if not data:
         return {"status": "ok"}
 
-    terminal_call = {"completed", "no-answer", "busy", "failed", "canceled"}
+    terminal_call = {"completed", "no-answer", "busy", "failed", "canceled", "cancel"}
     if call_status not in terminal_call:
         return {"status": "ok"}
     if data["status"] in ("processing", "completed", "abandoned", "failed", "callback_scheduled"):
@@ -979,14 +961,13 @@ async def twilio_status_callback(interview_id: str, request: Request, background
 
 @router.post("/twilio/amd/{interview_id}")
 async def twilio_amd_callback(interview_id: str, request: Request):
-    """Twilio Async AMD callback — fires when answering machine is detected."""
-    form        = await request.form()
-    answered_by = form.get("AnsweredBy", "")
-    call_sid    = form.get("CallSid", "")
-    print(f"[AMD] interview={interview_id} AnsweredBy={answered_by}")
+    """Async AMD callback — fires when Twilio detects an answering machine."""
+    form     = await request.form()
+    call_sid = form.get("CallSid", "")
+    print(f"[AMD] interview={interview_id} AnsweredBy={form.get('AnsweredBy','')}")
 
-    # Only act on machine detections — "human" means the call continues normally
-    if not answered_by.startswith("machine"):
+    # Only act on machine detections — human means the call continues normally
+    if not _is_machine(form):
         return {"status": "ok"}
 
     data = _get_interview(interview_id)
@@ -1000,10 +981,7 @@ async def twilio_amd_callback(interview_id: str, request: Request):
     # Hang up the live call
     if call_sid:
         try:
-            import os as _os
-            from twilio.rest import Client as _Client
-            _tc = _Client(_os.getenv("TWILIO_ACCOUNT_SID"), _os.getenv("TWILIO_AUTH_TOKEN"))
-            _tc.calls(call_sid).update(status="completed")
+            _terminate_call(call_sid)
         except Exception as e:
             print(f"[AMD] Failed to hang up call {call_sid}: {e}")
 

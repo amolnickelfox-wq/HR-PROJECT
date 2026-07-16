@@ -78,7 +78,7 @@ function StatusBadge({ c }) {
   return <span className="score-verdict score-verdict--sm" style={{ color: 'var(--text-3)' }}>—</span>
 }
 
-export default function BatchResultsTable({ candidates, isComplete = true, onCallCandidate, canEdit = true, onResolve, allActiveCalls = [] }) {
+export default function BatchResultsTable({ candidates = [], isComplete = true, onCallCandidate, canEdit = true, onResolve, allActiveCalls = [] }) {
   const [selected,    setSelected]    = useState(null)
   const [resolvedIds, setResolvedIds] = useState({}) // interview_id → resolved status
 

@@ -18,8 +18,10 @@ export function useBatch({ onSyncToOpenings, onAutoSaveJd, getActiveOpeningTitle
         const data = await res.json()
         setBatchData(data)
         if (data.candidates?.length) onSyncToOpenings?.(id, data.candidates)
+        // Note: 'callback_scheduled' is intentionally NOT "active" — a scheduled callback
+        // may be hours/days out, so counting it would keep this batch polling forever.
         const hasActive = data.candidates?.some(c =>
-          ['calling', 'in_progress', 'processing', 'callback_scheduled'].includes(c.interview_status)
+          ['calling', 'in_progress', 'processing'].includes(c.interview_status)
         )
         if (data.status === 'completed' && !hasActive) return
         const interval = hasActive || data.status === 'processing' ? 2500 : 6000
